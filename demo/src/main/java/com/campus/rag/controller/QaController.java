@@ -1,6 +1,7 @@
 package com.campus.rag.controller;
 
 import com.campus.rag.service.QaService;
+import com.campus.rag.service.ContextAssembler;
 import com.campus.rag.service.SessionDao;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,11 +42,14 @@ public class QaController {
 
     private final QaService qaService;
     private final SessionDao sessionDao;
+    private final ContextAssembler contextAssembler;
     private final ObjectMapper objectMapper;
 
-    public QaController(QaService qaService, SessionDao sessionDao, ObjectMapper objectMapper) {
+    public QaController(QaService qaService, SessionDao sessionDao,
+                        ContextAssembler contextAssembler, ObjectMapper objectMapper) {
         this.qaService = qaService;
         this.sessionDao = sessionDao;
+        this.contextAssembler = contextAssembler;
         this.objectMapper = objectMapper;
     }
 
@@ -64,7 +68,10 @@ public class QaController {
         // 先定会话：没给或给的 id 不存在，就新建一个，标题取问题前 20 字
         long sessionId = resolveSession(req.sessionId(), question);
 
-        QaService.QaAnswer answer = qaService.ask(question, topK);
+        // 取历史必须放在"本次提问入库"之前，取到的才是之前几轮而不是含自己
+        List<ContextAssembler.Turn> history = contextAssembler.load(sessionDao, sessionId);
+
+        QaService.QaAnswer answer = qaService.ask(question, topK, history);
 
         // 存消息。存失败不影响本次回答——问答是主线，记账是副线，副线出错只记日志。
         try {
@@ -88,11 +95,15 @@ public class QaController {
                 .body(answer);
     }
 
-    /** 调试：只看检索结果和拼好的提示词，不调模型 */
+    /** 调试：只看检索结果和拼好的提示词，不调模型；带 sessionId 时连多轮历史一起看 */
     @GetMapping("/preview")
     public Map<String, Object> preview(@RequestParam("q") String q,
-                                       @RequestParam(defaultValue = "3") int topK) {
-        return qaService.preview(q, Math.max(1, topK));
+                                       @RequestParam(defaultValue = "3") int topK,
+                                       @RequestParam(required = false) Long sessionId) {
+        List<ContextAssembler.Turn> history = sessionId == null
+                ? List.of()
+                : contextAssembler.load(sessionDao, sessionId);
+        return qaService.preview(q, Math.max(1, topK), history);
     }
 
     private long resolveSession(Long sessionId, String question) {

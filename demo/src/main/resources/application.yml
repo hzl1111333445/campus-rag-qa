@@ -53,6 +53,11 @@ campus:
     enabled: ${REWRITE_ENABLED:false}          # 默认关；关掉时检索行为与之前完全一致
     timeout-seconds: ${REWRITE_TIMEOUT_SECONDS:8}
     cache-size: ${REWRITE_CACHE_SIZE:500}      # 同一问句第二次改写 0 成本
+  context:                                    # 多轮对话：带多少历史（由 ContextAssembler 读取）
+    enabled: ${CONTEXT_ENABLED:true}          # 关掉就退回单轮行为，用于对比
+    turns: ${CONTEXT_TURNS:3}                 # 带最近几轮（1 轮 = 问 + 答）
+    max-chars-per-msg: ${CONTEXT_MAX_CHARS_PER_MSG:120}   # 单条历史截断长度
+    max-total-chars: ${CONTEXT_MAX_TOTAL_CHARS:600}       # 历史总字数上限，防止历史挤掉【资料】
   embedding:
     provider: ${EMBEDDING_PROVIDER:openai}   # openai = 真模型；hash = 离线假向量（还没写）
     model: ${EMBEDDING_MODEL:BAAI/bge-m3}    # 硅基流动上的免费向量模型

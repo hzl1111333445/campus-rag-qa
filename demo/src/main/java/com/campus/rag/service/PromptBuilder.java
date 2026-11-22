@@ -72,6 +72,20 @@ public class PromptBuilder {
      * @param hits     检索出来的块（已按相关度排好序）
      */
     public String buildUserPrompt(String question, List<RetrievalService.Hit> hits) {
+        return buildUserPrompt(question, hits, List.of());
+    }
+
+    /**
+     * 带多轮历史版本的 user 消息。
+     *
+     * <p>历史和【资料】的位置有讲究：<b>历史放在资料后面、问题前面</b>。
+     * 因为模型读提示词是顺序的，先看到"事实来源（资料）"，再看"这些话是在聊什么（历史）"，
+     * 最后看到"这次要回答的问题"。顺序反了，模型容易把历史当资料用。
+     *
+     * @param history 最近几轮对话（由 {@link ContextAssembler} 负责截断）
+     */
+    public String buildUserPrompt(String question, List<RetrievalService.Hit> hits,
+                                  List<ContextAssembler.Turn> history) {
         StringBuilder sb = new StringBuilder(2048);
 
         List<String> titles = documentDao.listIngestedTitles();
@@ -89,15 +103,32 @@ public class PromptBuilder {
                     .append("》第 ").append(h.chunkIndex()).append(" 块：\n")
                     .append(h.content()).append("\n\n");
         }
+
+        // 多轮：历史只用来理解"这句话在问什么"，不提供事实
+        if (history != null && !history.isEmpty()) {
+            sb.append("【对话历史】（只用来理解当前问题指的是什么；历史里助手说过的话不算资料，");
+            sb.append("不得作为依据，也不得出现在引用编号里）\n");
+            for (ContextAssembler.Turn t : history) {
+                sb.append("assistant".equals(t.role()) ? "助手：" : "用户：").append(t.content()).append('\n');
+            }
+            sb.append('\n');
+        }
+
         sb.append("【用户提问】\n").append(question);
         return sb.toString();
     }
 
     /** 拼成 OpenAI 格式的 messages 数组。 */
     public List<Map<String, String>> buildMessages(String question, List<RetrievalService.Hit> hits) {
+        return buildMessages(question, hits, List.of());
+    }
+
+    /** 拼成 OpenAI 格式的 messages 数组（带多轮历史）。 */
+    public List<Map<String, String>> buildMessages(String question, List<RetrievalService.Hit> hits,
+                                                   List<ContextAssembler.Turn> history) {
         List<Map<String, String>> messages = new ArrayList<>(2);
         messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
-        messages.add(Map.of("role", "user", "content", buildUserPrompt(question, hits)));
+        messages.add(Map.of("role", "user", "content", buildUserPrompt(question, hits, history)));
         return messages;
     }
 
@@ -174,9 +205,16 @@ public class PromptBuilder {
 
     /** 打日志/排查用：把拼好的 prompt 原样返回，看看模型到底看到了什么。 */
     public Map<String, Object> preview(String question, List<RetrievalService.Hit> hits) {
+        return preview(question, hits, List.of());
+    }
+
+    /** 打日志/排查用（带多轮历史）：看模型这次除了资料，还看到了哪几句历史。 */
+    public Map<String, Object> preview(String question, List<RetrievalService.Hit> hits,
+                                       List<ContextAssembler.Turn> history) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("system", SYSTEM_PROMPT);
-        m.put("user", buildUserPrompt(question, hits));
+        m.put("history", history == null ? List.of() : history);
+        m.put("user", buildUserPrompt(question, hits, history));
         return m;
     }
 }

@@ -100,7 +100,24 @@ public class QaService {
      * @param topK     检索几个块当资料
      */
     public QaAnswer ask(String question, int topK) {
+        return ask(question, topK, List.of());
+    }
+
+    /**
+     * 提问 → 回答（带多轮历史）。
+     *
+     * <p><b>历史在这一步只做一件事</b>：让模型看懂"那留校察看呢"里的"那"指的是什么。
+     * 它<b>不是事实来源</b>——上一轮模型自己说的话也可能是错的，拿它当依据会把错误一轮轮放大。
+     * 所以提示词里明确写了历史不得引用，事实仍然只能来自本轮检索到的【资料】。
+     *
+     * @param history 由 {@link ContextAssembler} 截断好的最近几轮对话，可为空
+     */
+    public QaAnswer ask(String question, int topK, List<ContextAssembler.Turn> history) {
         long begin = System.currentTimeMillis();
+        if (history != null && !history.isEmpty()) {
+            log.info("多轮：携带 {} 条历史（只用于理解指代）：{}",
+                    history.size(), ContextAssembler.describe(history));
+        }
 
         // ---------- 第 1 步：检索（混合粗排 → 精排 → 展开邻居，详见 docs/08）----------
         RetrievalService.Best best = retrievalService.searchBestGated(question, topK);
@@ -138,13 +155,13 @@ public class QaService {
                 // 第一步一条都没摘到：可能是资料确实不相关，也可能模型输出格式坏了。
                 // 这种情况退回单段式，保证系统不会因为"第一步失败"而答不了。
                 log.info("两段式第一步没摘出证据，回退单段式生成");
-                answer = chatClient.chat(promptBuilder.buildMessages(question, hits));
+                answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
             } else {
                 log.debug("两段式：摘到 {} 条原句，用它组答案", quotes.size());
                 answer = chatClient.chat(promptBuilder.buildAnswerMessagesFromQuotes(question, quotes, hits));
             }
         } else {
-            answer = chatClient.chat(promptBuilder.buildMessages(question, hits));
+            answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
         }
 
         // ---------- 第 4 步：校验引用编号 ----------
@@ -274,9 +291,15 @@ public class QaService {
 
     /** 调试用：只看检索 + 拼出来的提示词，不调模型（不花钱）。 */
     public Map<String, Object> preview(String question, int topK) {
+        return preview(question, topK, List.of());
+    }
+
+    /** 调试用（带多轮历史）：能看见这次除了资料，模型还看到了哪几句历史。 */
+    public Map<String, Object> preview(String question, int topK, List<ContextAssembler.Turn> history) {
         List<RetrievalService.Hit> hits = retrievalService.searchBest(question, topK);
-        Map<String, Object> data = new LinkedHashMap<>(promptBuilder.preview(question, hits));
+        Map<String, Object> data = new LinkedHashMap<>(promptBuilder.preview(question, hits, history));
         data.put("hitCount", hits.size());
+        data.put("historyCount", history == null ? 0 : history.size());
         data.put("hits", hits);
         return data;
     }
