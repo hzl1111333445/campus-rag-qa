@@ -52,6 +52,18 @@ public class DocumentDao {
         return n == null ? 0 : n;
     }
 
+    /**
+     * 已成功入库的文档标题列表。
+     *
+     * <p>用途：喂给模型，让它知道"本知识库收录了哪些文件"。
+     * 有了这份范围，它才能在答不上来时说出"目前未收录宿舍管理规定"，
+     * 而不是含糊地说"学校没有这项规定"——后者会误导学生。
+     */
+    public List<String> listIngestedTitles() {
+        return jdbc.queryForList(
+                "SELECT title FROM kb_document WHERE status = 2 ORDER BY id", String.class);
+    }
+
     /** 按 id 查一条文档（重新处理时要用 stored_name 去磁盘读原文件）。查不到返回 null。 */
     public Map<String, Object> findById(long id) {
         List<Map<String, Object>> rows = jdbc.queryForList(
