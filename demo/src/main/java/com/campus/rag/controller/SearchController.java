@@ -1,5 +1,6 @@
 package com.campus.rag.controller;
 
+import com.campus.rag.service.QueryRewriter;
 import com.campus.rag.service.RetrievalService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -22,9 +23,11 @@ import java.util.Map;
 public class SearchController {
 
     private final RetrievalService retrievalService;
+    private final QueryRewriter queryRewriter;
 
-    public SearchController(RetrievalService retrievalService) {
+    public SearchController(RetrievalService retrievalService, QueryRewriter queryRewriter) {
         this.retrievalService = retrievalService;
+        this.queryRewriter = queryRewriter;
     }
 
     /**
@@ -116,6 +119,25 @@ public class SearchController {
      * <p>标定自适应权重的门槛值就靠这个接口：把 dev 集所有题跑一遍，
      * 看 signal 的分布，再决定 bm25-strong-avg 取多少。
      */
+    /**
+     * 看查询改写的效果：GET /api/search/rewrite?q=借的书忘还了怎么算
+     *
+     * <p>返回原句、改写句、本次 BM25 信号，用来判断"改写到底有没有把话翻译对"。
+     * 改写关掉时 rewritten 为空，enabled=false。
+     */
+    @GetMapping("/search/rewrite")
+    public Map<String, Object> rewrite(@RequestParam("q") String q) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("question", q);
+        data.put("enabled", queryRewriter.enabled());
+        data.put("model", queryRewriter.modelName());
+        data.put("signal", Math.round(retrievalService.explainWeights(q).signal() * 100) / 100.0);
+        String rewritten = queryRewriter.rewrite(q);
+        data.put("rewritten", rewritten);
+        data.put("changed", rewritten != null && !rewritten.equals(q));
+        return data;
+    }
+
     @GetMapping("/search/weights")
     public Map<String, Object> weights(@RequestParam("q") String q) {
         RetrievalService.WeightDecision d = retrievalService.explainWeights(q);

@@ -90,11 +90,15 @@ public class RetrievalService {
     private volatile Bm25Index bm25Cache;
     private volatile String bm25CacheKey;
 
+    /** 查询改写器：把学生的口语问题翻译成规章书面语（关掉就退回原句） */
+    private final QueryRewriter queryRewriter;
+
     public RetrievalService(EmbeddingClient embeddingClient,
                             DocumentDao documentDao,
                             EmbeddingService embeddingService,
                             RerankClient rerankClient,
                             RerankProperties rerankProperties,
+                            QueryRewriter queryRewriter,
                             @Value("${campus.retrieval.hybrid-w-vector:0.2}") double hybridWeightVector,
                             @Value("${campus.retrieval.mode:hybrid}") String defaultMode,
                             @Value("${campus.retrieval.min-score-rerank:0.0}") double minScoreRerank,
@@ -107,6 +111,7 @@ public class RetrievalService {
         this.embeddingService = embeddingService;
         this.rerankClient = rerankClient;
         this.rerankProperties = rerankProperties;
+        this.queryRewriter = queryRewriter;
         this.hybridWeightVector = hybridWeightVector;
         this.defaultMode = SearchMode.from(defaultMode);
         this.minScoreRerank = minScoreRerank;
@@ -240,7 +245,8 @@ public class RetrievalService {
 
     /** 评测里的一种"检索配置"= 检索方式 + 是否去重 + 是否合并相邻块 + 是否展开邻居 + 是否精排 */
     public record Variant(String code, String label, SearchMode mode,
-                          boolean dedupe, boolean merge, boolean expand, boolean rerank) {
+                          boolean dedupe, boolean merge, boolean expand, boolean rerank,
+                          boolean rewrite) {
     }
 
     /**
@@ -255,15 +261,18 @@ public class RetrievalService {
      * 但交给大模型/前端的内容是展开后的（完整），这是最贴近工程实践的做法。
      */
     public static final List<Variant> EVAL_VARIANTS = List.of(
-            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false, false, false),
-            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false, false, false),
-            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false, false, false),
-            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false, false, false),
-            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, false, false, true),
-            new Variant("hybrid_merge", "混合 + 合并相邻块", SearchMode.HYBRID, true, true, false, false),
-            new Variant("hybrid_merge_rerank", "合并相邻块 + 精排", SearchMode.HYBRID, true, true, false, true),
-            new Variant("hybrid_expand", "混合 + 展开邻居", SearchMode.HYBRID, true, false, true, false),
-            new Variant("hybrid_rerank_expand", "精排 + 展开邻居", SearchMode.HYBRID, true, false, true, true)
+            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false, false, false, false),
+            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false, false, false, false),
+            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false, false, false, false),
+            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false, false, false, false),
+            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, false, false, true, false),
+            new Variant("hybrid_merge", "混合 + 合并相邻块", SearchMode.HYBRID, true, true, false, false, false),
+            new Variant("hybrid_merge_rerank", "合并相邻块 + 精排", SearchMode.HYBRID, true, true, false, true, false),
+            new Variant("hybrid_expand", "混合 + 展开邻居", SearchMode.HYBRID, true, false, true, false, false),
+            new Variant("hybrid_rerank_expand", "精排 + 展开邻居", SearchMode.HYBRID, true, false, true, true, false),
+            // 新增两路：查询改写（把口语问句翻译成书面语后再做 BM25，向量路仍用原句）
+            new Variant("hybrid_rewrite", "混合 + 查询改写", SearchMode.HYBRID, true, false, false, false, true),
+            new Variant("rewrite_rerank_expand", "改写 + 精排 + 展开", SearchMode.HYBRID, true, false, true, true, true)
     );
 
     /**
@@ -274,9 +283,19 @@ public class RetrievalService {
      * （精排那三路另外要多调精排接口，这个省不掉）。
      */
     public Map<String, List<Hit>> searchAllVariants(String question, int topK) {
-        Prepared p = prepare(question);
+        Prepared prepared = prepare(question);
+        // 改写只调一次（内部带缓存），九种配置共用
+        Prepared rewrittenPrepared = prepared;
+        if (queryRewriter.enabled()) {
+            String rewritten = queryRewriter.rewrite(question);
+            if (rewritten != null) {
+                rewrittenPrepared = withRewrittenBm25(prepared, rewritten);
+            }
+        }
         Map<String, List<Hit>> out = new LinkedHashMap<>();
         for (Variant v : EVAL_VARIANTS) {
+            // rewrite 那两路用"改写后的 BM25 分"，其余用原句的
+            Prepared p = v.rewrite() ? rewrittenPrepared : prepared;
             List<Hit> hits;
             if (v.merge()) {
                 hits = mergedHits(p, topK, v.dedupe(), v.rerank());
@@ -524,7 +543,8 @@ public class RetrievalService {
      * @param gated     是否因分数太低而建议拒答
      */
     public record Best(List<Hit> hits, double topScore, boolean reranked,
-                       double threshold, boolean gated) {
+                       double threshold, boolean gated,
+                       boolean rewritten, String rewrittenText) {
     }
 
     /**
@@ -536,6 +556,21 @@ public class RetrievalService {
      */
     public Best searchBestGated(String question, int topK) {
         Prepared p = prepare(question);
+
+        // 第 0 步：问句是不是"学生话"？是的话先翻译成规章书面语，再算 BM25。
+        // 为什么用信号判断而不是每次都改写：改写要调大模型，有 token 成本与延迟。
+        // BM25 信号已经足够强，说明字面对得上，没必要花钱改写。
+        String rewrittenText = null;
+        WeightDecision decision = decideWeights(p);
+        if (queryRewriter.enabled() && decision.signal() < bm25StrongAvg) {
+            String rw = queryRewriter.rewrite(question);
+            if (rw != null) {
+                rewrittenText = rw;
+                p = withRewrittenBm25(p, rw);
+                log.debug("查询改写：{} → {}", question, rw);
+            }
+        }
+
         boolean reranked = rerankClient.available();
         List<Hit> ranked = reranked
                 ? rerankedHits(p, topK, true)
@@ -547,7 +582,8 @@ public class RetrievalService {
         if (gated) {
             log.info("检索置信度不足，建议拒答：{}（最高分 {} < 阈值 {}）", question, topScore, threshold);
         }
-        return new Best(hits, topScore, reranked, threshold, gated);
+        return new Best(hits, topScore, reranked, threshold, gated,
+                rewrittenText != null, rewrittenText);
     }
 
     /** 直接走"混合 + 精排"两阶段（给搜索接口用） */
@@ -560,7 +596,14 @@ public class RetrievalService {
                             List<DocumentDao.ChunkWithEmbedding> chunks,
                             double[] vectorScores,
                             double[] bm25Scores,
-                            long prepareMs) {
+                            long prepareMs,
+                            Bm25Index index) {
+    }
+
+    /** 用改写后的问题重算 BM25 分，其余（向量分、块列表、索引）复用 */
+    private Prepared withRewrittenBm25(Prepared p, String rewritten) {
+        return new Prepared(p.question(), p.chunks(), p.vectorScores(),
+                p.index().scores(rewritten), p.prepareMs(), p.index());
     }
 
     private record Run(List<Hit> hits, long elapsedMs) {
@@ -604,7 +647,7 @@ public class RetrievalService {
         double[] bm25Scores = index.scores(question);
 
         return new Prepared(question, chunks, vectorScores, bm25Scores,
-                System.currentTimeMillis() - begin);
+                System.currentTimeMillis() - begin, index);
     }
 
     /** 取 BM25 索引：块数或最大块 id 变了就重建 */

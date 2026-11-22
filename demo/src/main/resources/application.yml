@@ -35,14 +35,20 @@ campus:
     # 没开精排时用这个（混合 RRF 分，量级只有 0.0x，不能和精排分混用）
     min-score-hybrid: ${RETRIEVAL_MIN_SCORE_HYBRID:0.0}
     hybrid-w-vector: ${HYBRID_W_VECTOR:0.2}   # 混合时向量那一路的权重，BM25 那一路是 0.8
-  # ---------- 自适应融合（动态权重）----------
-  # 硬改写题（"借的书忘还了怎么算"）BM25 打不出分，固定 0.8 权重会把向量排对的结果挤掉。
-  # 打开后：先看 BM25 信号强弱，弱就把权重让给向量。
-  adaptive: ${RETRIEVAL_ADAPTIVE:false}
-  bm25-strong-avg: ${RETRIEVAL_BM25_STRONG_AVG:1.5}   # BM25 最高分÷查询词数 ≥ 它算"信号足够"
-  weak-w-vector: ${RETRIEVAL_WEAK_W_VECTOR:0.7}       # 信号弱时向量权重上调到多少
     # 为什么向量只给 0.2？实测（414 块、真 bge-m3 向量）纯向量在"列举型"问题上漏块，
     # 而中文校园规章这种文本，字面重叠度很高，BM25 更稳。这个数是可调的实验参数。
+    # ---------- 自适应融合（动态权重，见 docs/13）----------
+    # 硬改写题（"借的书忘还了怎么算"）BM25 打不出分，固定 0.8 权重会把向量排对的结果挤掉。
+    # 打开后：先看 BM25 信号强弱，弱就把权重让给向量。
+    # 注意：这三项必须在 retrieval 下面（之前误写在 campus 下，等于没生效）
+    adaptive: ${RETRIEVAL_ADAPTIVE:false}
+    bm25-strong-avg: ${RETRIEVAL_BM25_STRONG_AVG:1.5}   # BM25 最高分÷查询词数 ≥ 它算"信号足够"
+    weak-w-vector: ${RETRIEVAL_WEAK_W_VECTOR:0.7}       # 信号弱时向量权重上调到多少
+  # ---------- 查询改写（把学生口语翻译成规章书面语，见 docs/14）----------
+  rewrite:
+    enabled: ${REWRITE_ENABLED:false}          # 默认关；关掉时检索行为与之前完全一致
+    timeout-seconds: ${REWRITE_TIMEOUT_SECONDS:8}
+    cache-size: ${REWRITE_CACHE_SIZE:500}      # 同一问句第二次改写 0 成本
   embedding:
     provider: ${EMBEDDING_PROVIDER:openai}   # openai = 真模型；hash = 离线假向量（还没写）
     model: ${EMBEDDING_MODEL:BAAI/bge-m3}    # 硅基流动上的免费向量模型
