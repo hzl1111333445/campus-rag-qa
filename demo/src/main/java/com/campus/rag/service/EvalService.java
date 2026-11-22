@@ -91,6 +91,19 @@ public class EvalService {
      * @param topK 每次检索取前几条（一般 3，和线上给模型的资料条数一致）
      */
     public Report run(int topK) {
+        return run(topK, done -> {
+        });
+    }
+
+    /**
+     * 跑一轮评测，并把"已完成多少题"报给调用方。
+     *
+     * <p>为什么要回调：一轮 118 道题 × 13 种配置要跑几分钟，浏览器等不了这么久，
+     * 接口也就不能同步返回。回调把进度推给后台任务，前端轮询进度条即可。
+     *
+     * @param onProgress 每处理完一道题回调一次，参数是累计已完成题数
+     */
+    public Report run(int topK, java.util.function.IntConsumer onProgress) {
         List<Question> all = loadQuestions();
         // "无答案"题不参与检索评测：它们的正确答案是"拒答"，属于生成层的评估
         List<Question> answerable = new ArrayList<>();
@@ -122,6 +135,7 @@ public class EvalService {
 
         long begin = System.currentTimeMillis();
 
+        int processed = 0;
         for (Question q : answerable) {
             // 每题只做一次向量化 + 一次读库，4 种配置复用（否则要调用 4 次 embedding 接口）
             Map<String, List<RetrievalService.Hit>> results =
@@ -158,6 +172,11 @@ public class EvalService {
                     scell[1] += 1;
                     scell[2] += 1.0 / firstRank;
                 }
+            }
+
+            processed++;
+            if (onProgress != null) {
+                onProgress.accept(processed);
             }
         }
 

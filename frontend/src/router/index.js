@@ -4,8 +4,8 @@ import HealthView from '../views/HealthView.vue'
 import QaView from '../views/QaView.vue'
 import DocView from '../views/DocView.vue'
 import LoginView from '../views/LoginView.vue'
-import Placeholder from '../views/Placeholder.vue'
 import DebugView from '../views/DebugView.vue'
+import EvalView from '../views/EvalView.vue'
 import { isAdmin, isLoggedIn } from '../store/auth'
 
 /**
@@ -51,8 +51,8 @@ const routes = [
   {
     path: '/eval',
     name: 'eval',
-    component: Placeholder,
-    meta: { title: '评测看板', adminOnly: true, todo: '第 5 步：跑评测 / 配置对比表 / 历史结果' }
+    component: EvalView,
+    meta: { title: '评测看板', adminOnly: true }
   }
 ]
 
