@@ -62,6 +62,8 @@ public class QaService {
      * @param retrievedCount    检索回来几个块
      * @param citationOk        回答里的编号是否全部合法（没有编造）
      * @param invalidCitations  编造的编号（比如资料只有 3 条，它却写了 [5]）
+     * @param topScore          最高检索分（精排分或混合分，看有没有开精排）
+     * @param gated             是否因为检索分太低而"在检索层就拒答"（这种情况没花大模型的钱）
      */
     public record QaAnswer(String question,
                            String answer,
@@ -70,6 +72,8 @@ public class QaService {
                            int retrievedCount,
                            boolean citationOk,
                            List<Integer> invalidCitations,
+                           double topScore,
+                           boolean gated,
                            long elapsedMs) {
     }
 
@@ -83,12 +87,26 @@ public class QaService {
         long begin = System.currentTimeMillis();
 
         // ---------- 第 1 步：检索（混合粗排 → 精排 → 展开邻居，详见 docs/08）----------
-        List<RetrievalService.Hit> hits = retrievalService.searchBest(question, topK);
+        RetrievalService.Best best = retrievalService.searchBestGated(question, topK);
+        List<RetrievalService.Hit> hits = best.hits();
+
+        // 一条都没检索到：连资料都没有，直接拒答（不花钱）
         if (hits.isEmpty()) {
             return new QaAnswer(question,
-                    "资料中没有找到相关规定，建议咨询学校相关职能部门。",
-                    chatClient.model(), List.of(), 0, true, List.of(),
+                    "本知识库暂未收录与该问题相关的规定，建议咨询学校相关职能部门或查看学校官网。",
+                    chatClient.model(), List.of(), 0, true, List.of(), 0.0, true,
                     System.currentTimeMillis() - begin);
+        }
+
+        // 检索分数低于阈值：资料太不相关，问了模型也只能编 → 在检索层就拒答
+        // 这是"宁可说没查到，也不猜"的工程化实现，见 docs/09-拒答阈值
+        if (best.gated()) {
+            return new QaAnswer(question,
+                    "本知识库暂未收录与该问题相关的规定（检索置信度不足，最高相关度 "
+                            + best.topScore() + "，低于阈值 " + best.threshold() + "）。\n\n"
+                            + "你可以换一种问法重试，也可以直接咨询学校相关职能部门。",
+                    chatClient.model(), List.of(), hits.size(), true, List.of(),
+                    best.topScore(), true, System.currentTimeMillis() - begin);
         }
 
         // ---------- 第 2 步：拼提示词 ----------
@@ -128,7 +146,7 @@ public class QaService {
         }
 
         return new QaAnswer(question, answer, chatClient.model(), references, hits.size(),
-                citationOk, invalid, System.currentTimeMillis() - begin);
+                citationOk, invalid, best.topScore(), false, System.currentTimeMillis() - begin);
     }
 
     /** 调试用：只看检索 + 拼出来的提示词，不调模型（不花钱）。 */

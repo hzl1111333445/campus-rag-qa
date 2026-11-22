@@ -30,17 +30,38 @@ public class SearchController {
     /**
      * 例子：GET /api/search?q=违纪处分有哪几种&topK=3&mode=hybrid
      *
-     * @param mode vector / bm25 / hybrid，不传用配置里的默认值
+     * @param mode vector / bm25 / hybrid / <b>best</b>（best = 混合 → 精排 → 展开邻居，
+     *             并返回 gated/topScore，用于观察"该不该拒答"）
      */
     @GetMapping("/search")
     public Map<String, Object> search(@RequestParam("q") String q,
                                       @RequestParam(defaultValue = "3") int topK,
                                       @RequestParam(required = false) String mode) {
         long begin = System.currentTimeMillis();
+        int k = Math.max(1, topK);
+
+        // best 是"生产线"，它多返回两个字段（最高分、是否被闸门拦下）
+        if ("best".equalsIgnoreCase(mode)) {
+            RetrievalService.Best best = retrievalService.searchBestGated(q, k);
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("question", q);
+            data.put("mode", "best");
+            data.put("modeLabel", "混合 + 精排 + 展开邻居");
+            data.put("topK", k);
+            data.put("count", best.hits().size());
+            data.put("topScore", best.topScore());
+            data.put("reranked", best.reranked());
+            data.put("threshold", best.threshold());
+            data.put("gated", best.gated());
+            data.put("elapsedMs", System.currentTimeMillis() - begin);
+            data.put("hits", best.hits());
+            return data;
+        }
+
         RetrievalService.SearchMode m = mode == null
                 ? RetrievalService.SearchMode.from(retrievalService.defaultModeCode())
                 : RetrievalService.SearchMode.from(mode);
-        List<RetrievalService.Hit> hits = retrievalService.search(q, Math.max(1, topK), m);
+        List<RetrievalService.Hit> hits = retrievalService.search(q, k, m);
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("question", q);

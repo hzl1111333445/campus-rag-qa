@@ -57,6 +57,19 @@ public class RetrievalService {
     /** 没指定方式时用哪种 */
     private final SearchMode defaultMode;
 
+    /**
+     * 拒答阈值：精排分低于它就不必再问大模型了（大模型没有可靠资料只能编）。
+     *
+     * <p>两个阈值分开配，因为两种分数的量纲完全不同：
+     * <ul>
+     *   <li>精排分（Cross-Encoder 输出）在 0~1，且区分度很大：真能答上来的常见 0.5~0.9，答不上来的 0.0~0.2</li>
+     *   <li>混合 RRF 分是 Σ 1/(60+名次)，两路都排第一也只有 0.0328，量级差 20 倍</li>
+     * </ul>
+     * 用同一个数字卡两种分数，必然有一边是错的。
+     */
+    private final double minScoreRerank;
+    private final double minScoreHybrid;
+
     /** BM25 索引缓存：它的构建要遍历所有块，不能每次查询都重建 */
     private volatile Bm25Index bm25Cache;
     private volatile String bm25CacheKey;
@@ -67,7 +80,9 @@ public class RetrievalService {
                             RerankClient rerankClient,
                             RerankProperties rerankProperties,
                             @Value("${campus.retrieval.hybrid-w-vector:0.2}") double hybridWeightVector,
-                            @Value("${campus.retrieval.mode:hybrid}") String defaultMode) {
+                            @Value("${campus.retrieval.mode:hybrid}") String defaultMode,
+                            @Value("${campus.retrieval.min-score-rerank:0.0}") double minScoreRerank,
+                            @Value("${campus.retrieval.min-score-hybrid:0.0}") double minScoreHybrid) {
         this.embeddingClient = embeddingClient;
         this.documentDao = documentDao;
         this.embeddingService = embeddingService;
@@ -75,6 +90,8 @@ public class RetrievalService {
         this.rerankProperties = rerankProperties;
         this.hybridWeightVector = hybridWeightVector;
         this.defaultMode = SearchMode.from(defaultMode);
+        this.minScoreRerank = minScoreRerank;
+        this.minScoreHybrid = minScoreHybrid;
     }
 
     /** 检索方式 */
@@ -429,11 +446,43 @@ public class RetrievalService {
      * 所以正确的顺序是「排序要精，给模型看要全」：排名用单块，内容用三块。
      */
     public List<Hit> searchBest(String question, int topK) {
+        return searchBestGated(question, topK).hits();
+    }
+
+    /**
+     * 推荐的检索结果 + 「这道题到底该不该答」的判断。
+     *
+     * @param hits      检索到的块（内容已展开邻居）
+     * @param topScore  最高分（精排开着就是精排分，没开就是混合 RRF 分）
+     * @param reranked  这次有没有真的用到精排
+     * @param threshold 本次生效的阈值（0 表示没设阈值）
+     * @param gated     是否因分数太低而建议拒答
+     */
+    public record Best(List<Hit> hits, double topScore, boolean reranked,
+                       double threshold, boolean gated) {
+    }
+
+    /**
+     * 带"分数闸门"的检索。
+     *
+     * <p><b>为什么要在检索层拦</b>：没有相关资料的题，光靠提示词让模型拒绝是"兜底"，
+     * 兜得住也白花一次大模型调用。加了闸门就是"资料不够 → 根本不问模型"，
+     * 既省钱又少一次编造的机会。这叫"宁可说没查到，也不猜"。
+     */
+    public Best searchBestGated(String question, int topK) {
         Prepared p = prepare(question);
-        List<Hit> ranked = rerankClient.available()
+        boolean reranked = rerankClient.available();
+        List<Hit> ranked = reranked
                 ? rerankedHits(p, topK, true)
                 : buildHits(p, topK, SearchMode.HYBRID, true);
-        return expandHits(p, ranked);
+        List<Hit> hits = expandHits(p, ranked);
+        double topScore = hits.isEmpty() ? 0.0 : hits.get(0).score();
+        double threshold = reranked ? minScoreRerank : minScoreHybrid;
+        boolean gated = threshold > 0 && topScore < threshold;
+        if (gated) {
+            log.info("检索置信度不足，建议拒答：{}（最高分 {} < 阈值 {}）", question, topScore, threshold);
+        }
+        return new Best(hits, topScore, reranked, threshold, gated);
     }
 
     /** 直接走"混合 + 精排"两阶段（给搜索接口用） */
