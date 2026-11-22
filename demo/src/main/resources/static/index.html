@@ -430,13 +430,25 @@
             const gateBadge = d.gated
                 ? '<span class="badge err">置信度不足 · 已拒答</span>'
                 : '<span class="badge ok">基于资料作答</span>';
+            // 接地校验：回答里的硬事实能否在被引用的原文里找到（后端 AnswerGuard 逐条核过）
+            // factCount=0 表示这段回答里没有数字/时间/处分名这类可核对的事实，如实说明"没核到"
+            let groundBadge;
+            if (d.factCount === 0) {
+                groundBadge = '<span class="badge warn" title="这段回答里没有可核对的事实">无可核对事实</span>';
+            } else if (d.grounded) {
+                groundBadge = `<span class="badge ok">${d.factCount} 个事实已核对</span>`;
+            } else {
+                const list = (d.missingFacts || []).map(esc).join('、');
+                groundBadge = `<span class="badge warn" title="${list}">${d.missingFacts.length} 个事实与原文不符</span>`;
+            }
             $('qaMeta').innerHTML =
                 `<span>模型 ${esc(d.model)}</span>` +
                 `<span>耗时 ${d.elapsedMs} ms</span>` +
                 `<span>检索 ${d.retrievedCount} 块</span>` +
                 `<span>最高相关度 ${d.topScore}</span>` +
                 `<span>${gateBadge}</span>` +
-                `<span>${citeBadge}${invalid}</span>`;
+                `<span>${citeBadge}${invalid}</span>` +
+                `<span>${groundBadge}</span>`;
 
             // 答案：把 [1] 变成可点击的上标
             renderAnswer(d.answer);
