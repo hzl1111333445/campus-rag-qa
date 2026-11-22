@@ -36,6 +36,23 @@ public class LlmProperties {
     /** 超时秒数。模型偶尔会慢，给 60 秒 */
     private int timeoutSeconds = 60;
 
+    /**
+     * 是否启用"两段式生成"：①先让模型只摘原句 ②再让它只用这些原句组答案。
+     *
+     * <p>默认开。理由见 docs/16：46 道答不好的题里 30 道是"资料已经在 Top3、模型还编细节"，
+     * 单段式下模型会边找边写、顺手补常识；两段式把"找"和"写"拆开，它就没有机会想起来。
+     * 关掉可以回退到单段式（对比实验用）。
+     */
+    private boolean twoStage = true;
+
+    public boolean isTwoStage() {
+        return twoStage;
+    }
+
+    public void setTwoStage(boolean twoStage) {
+        this.twoStage = twoStage;
+    }
+
     public String getBaseUrl() {
         return baseUrl;
     }

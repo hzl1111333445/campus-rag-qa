@@ -101,6 +101,77 @@ public class PromptBuilder {
         return messages;
     }
 
+    // ==================== 两段式：第一步"只摘原句" ====================
+
+    /**
+     * 第一步的提示词：只摘原句，不许解释。
+     *
+     * <p>为什么要分两步（2026-11-22 端到端评测之后的结论）：
+     * 46 道答不好的题里有 30 道是"资料已经在 Top3 里，模型还是编细节"。
+     * 原因是让模型"边找边写"时，它会顺手把全国高校的通用经验（6 个月、9 个月、绩点 3.5）
+     * 补进答案里。先把能回答问题的原句逐字抄出来，再让它只用这些原句组答案，
+     * 模型就没有机会"想起来"资料之外的细节。
+     */
+    static final String EXTRACT_SYSTEM_PROMPT = """
+            你是校园规章制度资料的摘录助手。给你若干条资料和一个问题，你唯一的任务：
+            从资料里找出能回答这个问题的原句，逐字复制出来，一个字都不许改。
+            规则：
+            1. 只摘录，不解释、不总结、不改写、不补充任何常识。
+            2. 摘出来的每一条，必须能在资料里原文找到（包括数字、金额、期限、条号、学时）。
+            3. 每条不超过 120 字，最多 5 条；与问题无关的资料不要摘。
+            4. 资料里都没有相关内容时，输出空数组 []。
+            5. 只输出 JSON 数组，不要任何解释文字，不要 Markdown 代码块。格式：
+            [{"n":1,"quote":"资料原句"},{"n":2,"quote":"资料原句"}]
+            其中 n 是资料编号（上面 [1] [2] 里的那个数字）。
+            """;
+
+    /** 第一步用到的 messages：资料 + 问题。 */
+    public List<Map<String, String>> buildExtractMessages(String question, List<RetrievalService.Hit> hits) {
+        StringBuilder sb = new StringBuilder(1024);
+        sb.append("【资料】\n");
+        for (int i = 0; i < hits.size(); i++) {
+            RetrievalService.Hit h = hits.get(i);
+            sb.append('[').append(i + 1).append("] 《").append(h.documentTitle())
+                    .append("》第 ").append(h.chunkIndex()).append(" 块：\n")
+                    .append(h.content()).append("\n\n");
+        }
+        sb.append("【用户提问】\n").append(question).append("\n\n");
+        sb.append("请按规则只输出 JSON 数组。");
+        List<Map<String, String>> messages = new ArrayList<>(2);
+        messages.add(Map.of("role", "system", "content", EXTRACT_SYSTEM_PROMPT));
+        messages.add(Map.of("role", "user", "content", sb.toString()));
+        return messages;
+    }
+
+    /** 第一步摘出来的一条证据：资料编号 n + 原句。 */
+    public record Quote(int n, String text) {
+    }
+
+    /**
+     * 第二步的 messages：把第一步摘出的原句当"唯一依据"，让模型组织答案。
+     *
+     * <p>注意这里给的是"证据"而不是整块资料——上下文从 3×240 字降到通常不到 200 字，
+     * 既省钱又减少干扰。
+     */
+    public List<Map<String, String>> buildAnswerMessagesFromQuotes(String question,
+                                                                   List<Quote> quotes,
+                                                                   List<RetrievalService.Hit> hits) {
+        StringBuilder sb = new StringBuilder(1024);
+        sb.append("【证据】（下面是第一步从资料里逐字摘出的原句，编号即资料编号）\n");
+        for (Quote q : quotes) {
+            RetrievalService.Hit h = hits.get(q.n() - 1);
+            sb.append('[').append(q.n()).append("] 《").append(h.documentTitle()).append("》：")
+                    .append(q.text()).append('\n');
+        }
+        sb.append("\n【用户提问】\n").append(question).append("\n\n");
+        sb.append("要求：只能用上面【证据】里的内容作答。证据里没有的数字、期限、条号、处分等级一律不写，");
+        sb.append("也不要凭常识补全。证据不足以回答时，就说\"本知识库暂未收录这方面的规定\"。");
+        List<Map<String, String>> messages = new ArrayList<>(2);
+        messages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        messages.add(Map.of("role", "user", "content", sb.toString()));
+        return messages;
+    }
+
     /** 打日志/排查用：把拼好的 prompt 原样返回，看看模型到底看到了什么。 */
     public Map<String, Object> preview(String question, List<RetrievalService.Hit> hits) {
         Map<String, Object> m = new LinkedHashMap<>();

@@ -61,6 +61,8 @@ campus:
     api-key: ${EMBEDDING_API_KEY:}           # 留空没关系，真正的值在 application-local.yml
     batch-size: 16                           # 一次请求发多少条
   llm:
+    # 两段式生成：先只摘原句，再只用原句组答案（docs/16）。关掉可回退单段式做对比实验
+    two-stage: ${LLM_TWO_STAGE:false}
     base-url: ${LLM_BASE_URL:https://api.deepseek.com/v1}
     model: ${LLM_MODEL:deepseek-chat}        # DeepSeek 的便宜模型，够用
     api-key: ${DEEPSEEK_API_KEY:}            # 真正的值在 application-local.yml
