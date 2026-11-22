@@ -39,3 +39,4 @@ _commitmsg.txt
 # 简历含手机号等个人信息，不提交到 Git
 docs/简历/
 docs-src-web/
+docs-src-manual/
