@@ -216,7 +216,7 @@
 
     .compare-grid {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
         gap: 16px;
         margin-top: 16px;
     }
@@ -258,6 +258,7 @@
 <div class="tabs">
     <button class="tab active" data-panel="qa">智能问答</button>
     <button class="tab" data-panel="compare">检索对比</button>
+    <button class="tab" data-panel="eval">评测看板</button>
 </div>
 
 <main>
@@ -294,6 +295,29 @@
         </div>
         <div class="compare-grid" id="cmpGrid"></div>
     </section>
+
+    <!-- ================= 评测看板 ================= -->
+    <section class="panel" id="panel-eval">
+        <div class="card">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button id="evalBtn">跑一遍评测</button>
+                <span style="font-size:13px;color:#6b7280">
+                    用 36 道题跑全部检索配置，看 Recall@3 与 MRR（约 25 秒，其中 4 道"库内无答案"题不计入命中统计）
+                </span>
+            </div>
+            <p style="font-size:13px;color:#6b7280;margin:12px 0 0">
+                <b>Recall@3</b>：正确答案是否出现在前 3 条里；<b>MRR</b>：正确答案排得越靠前越接近 1。
+                题目集在 <code>data/testset/eval_questions.tsv</code>，可以自己加题。
+            </p>
+        </div>
+        <div class="card" id="evalResult" style="display:none">
+            <div class="meta" id="evalMeta"></div>
+            <table id="evalTable" style="width:100%;border-collapse:collapse;font-size:14px">
+                <thead></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </section>
 </main>
 
 <footer>数据来源：广州软件学院公开规章制度 · 回答由大模型基于检索到的原文生成，请以正式文件为准</footer>
@@ -308,6 +332,16 @@
             .replace(/"/g, '&quot;');
     }
 
+    // 统一响应体拆包：后端的 /api/eval 用的是 {code, message, data} 包装，
+    // /api/qa、/api/search 是裸对象。这里统一处理，页面各处就不用各写一遍。
+    function unwrap(json) {
+        if (json && typeof json === 'object' && typeof json.code === 'number' && 'data' in json) {
+            if (json.code !== 0) throw new Error(json.message || ('业务错误 ' + json.code));
+            return json.data;
+        }
+        return json;
+    }
+
     async function postJson(url, body) {
         const resp = await fetch(url, {
             method: 'POST',
@@ -318,13 +352,13 @@
         let data;
         try { data = JSON.parse(text); } catch (e) { throw new Error('服务返回的不是 JSON：' + text.slice(0, 200)); }
         if (!resp.ok) throw new Error((data && data.message) || ('HTTP ' + resp.status));
-        return data;
+        return unwrap(data);
     }
 
     async function getJson(url) {
         const resp = await fetch(url);
         const text = await resp.text();
-        try { return JSON.parse(text); } catch (e) { throw new Error('服务返回的不是 JSON：' + text.slice(0, 200)); }
+        try { return unwrap(JSON.parse(text)); } catch (e) { throw new Error('服务返回的不是 JSON：' + text.slice(0, 200)); }
     }
 
     // ---------------- 标签切换 ----------------
@@ -386,16 +420,22 @@
         try {
             const d = await postJson('/api/qa', { question: question, topK: 3 });
 
-            // 顶部信息：模型、耗时、引用校验结果
+            // 顶部信息：模型、耗时、检索置信度、是否被拒答、引用校验结果
             const citeBadge = d.citationOk
                 ? '<span class="badge ok">引用合法</span>'
                 : '<span class="badge warn">引用需人工核对</span>';
             const invalid = (d.invalidCitations && d.invalidCitations.length)
                 ? ` · 编造编号 ${esc(d.invalidCitations.join(','))}` : '';
+            // 拒答标记：检索置信度不够时后端直接拦掉，不调大模型，省钱又快
+            const gateBadge = d.gated
+                ? '<span class="badge err">置信度不足 · 已拒答</span>'
+                : '<span class="badge ok">基于资料作答</span>';
             $('qaMeta').innerHTML =
                 `<span>模型 ${esc(d.model)}</span>` +
                 `<span>耗时 ${d.elapsedMs} ms</span>` +
                 `<span>检索 ${d.retrievedCount} 块</span>` +
+                `<span>最高相关度 ${d.topScore}</span>` +
+                `<span>${gateBadge}</span>` +
                 `<span>${citeBadge}${invalid}</span>`;
 
             // 答案：把 [1] 变成可点击的上标
@@ -488,6 +528,58 @@
 
     $('cmpBtn').onclick = compare;
     $('cq').addEventListener('keydown', e => { if (e.key === 'Enter') compare(); });
+
+    // ---------------- 评测看板 ----------------
+    async function runEval() {
+        const btn = $('evalBtn');
+        btn.disabled = true;
+        btn.textContent = '正在评测…';
+        $('evalResult').style.display = 'block';
+        $('evalMeta').innerHTML = '<span class="loading">跑 36 道题，约 25 秒…</span>';
+        $('evalTable').querySelector('thead').innerHTML = '';
+        $('evalTable').querySelector('tbody').innerHTML = '';
+
+        try {
+            const d = await getJson('/api/eval/run?topK=3');
+            $('evalMeta').innerHTML =
+                `<span>有效题 ${d.questionCount} 道</span>` +
+                `<span>另有 ${d.skippedNoAnswer} 道"库内无答案"题不计入</span>` +
+                `<span>索引 ${d.chunkTotal} 块</span>` +
+                `<span>耗时 ${d.elapsedMs} ms</span>` +
+                `<span>Top-K = ${d.topK}</span>`;
+
+            const thead = $('evalTable').querySelector('thead');
+            thead.innerHTML = `<tr style="text-align:left;color:#6b7280">
+                    <th style="padding:8px 6px">检索配置</th>
+                    <th style="padding:8px 6px">命中</th>
+                    <th style="padding:8px 6px">Recall@3</th>
+                    <th style="padding:8px 6px">MRR</th>
+                </tr>`;
+            const tbody = $('evalTable').querySelector('tbody');
+            (d.variants || []).forEach(v => {
+                const tr = document.createElement('tr');
+                // 把最好的那行标绿色，一眼能看出结论
+                const isBest = Math.abs(v.recall - Math.max(...d.variants.map(x => x.recall))) < 1e-9;
+                tr.style.borderTop = '1px solid #e5e7eb';
+                if (isBest) tr.style.background = '#ecfdf5';
+                tr.innerHTML =
+                    `<td style="padding:8px 6px">${esc(v.label)} <span style="color:#9ca3af;font-size:12px">${esc(v.code)}</span></td>
+                     <td style="padding:8px 6px">${v.hits}/${v.questionCount}</td>
+                     <td style="padding:8px 6px"><b>${(v.recall * 100).toFixed(2)}%</b></td>
+                     <td style="padding:8px 6px">${v.mrr.toFixed(4)}</td>`;
+                tbody.appendChild(tr);
+            });
+        } catch (e) {
+            $('evalMeta').innerHTML = '';
+            $('evalTable').querySelector('tbody').innerHTML =
+                `<tr><td class="errbox">出错了：${esc(e.message)}</td></tr>`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '跑一遍评测';
+        }
+    }
+
+    $('evalBtn').onclick = runEval;
 </script>
 </body>
 </html>

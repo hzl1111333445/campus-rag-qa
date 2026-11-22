@@ -72,6 +72,11 @@ public class DocumentDao {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /** 删除一条文档记录（块要先用 deleteChunks 删掉）。返回影响行数。 */
+    public int deleteById(long id) {
+        return jdbc.update("DELETE FROM kb_document WHERE id = ?", id);
+    }
+
     /** 需要（重新）入库的文档 id：没处理成功的、或者一个块都没有的。 */
     public List<Long> findIdsNeedingIngest() {
         return jdbc.queryForList(

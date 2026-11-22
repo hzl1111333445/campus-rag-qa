@@ -106,4 +106,36 @@ public class DocumentController {
         data.put("elapsedMs", System.currentTimeMillis() - begin);
         return data;
     }
+
+    /**
+     * 删除一份文档：先删块，再删记录，最后删磁盘原文件。
+     *
+     * <p>为什么顺序不能反：kb_chunk 靠 document_id 关联，记录先删掉就再也找不到这些块了，
+     * 会留下永远没人认领的"孤儿块"，检索时还会被捞出来。
+     */
+    @DeleteMapping("/{id}")
+    public Map<String, Object> delete(@PathVariable long id) {
+        Map<String, Object> doc = documentDao.findById(id);
+        if (doc == null) {
+            throw new IllegalArgumentException("文档不存在：" + id);
+        }
+
+        documentDao.deleteChunks(id);
+        int deleted = documentDao.deleteById(id);
+
+        // 磁盘文件删除失败不影响数据库一致性，只记录一下
+        String storedName = String.valueOf(doc.get("stored_name"));
+        boolean fileRemoved = false;
+        try {
+            fileRemoved = java.nio.file.Files.deleteIfExists(storage.dir().resolve(storedName));
+        } catch (IOException e) {
+            fileRemoved = false;
+        }
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("id", id);
+        data.put("deleted", deleted);
+        data.put("fileRemoved", fileRemoved);
+        return data;
+    }
 }
