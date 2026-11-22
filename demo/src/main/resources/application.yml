@@ -1,0 +1,43 @@
+server:
+  port: 8081          # 用 8081，把 8080 让给我的参考项目，避免两个服务抢端口
+
+spring:
+  application:
+    name: campus-rag
+  # ---------- 加载本机私有配置 ----------
+  # application-local.yml 里放 key、密码这类不能进 Git 的东西。
+  # optional: 表示这个文件不存在也能启动（别人 clone 你的项目时不会被卡住）。
+  config:
+    import: optional:classpath:application-local.yml
+  datasource:
+      url: jdbc:mysql://127.0.0.1:3306/campus_rag?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+      username: root
+      password: "123456"      # 引号必须加，不加 YAML 会当成数字
+  servlet:
+    multipart:        # 文件上传大小限制，不写的话默认 1MB，传大文件会报错
+      max-file-size: 20MB
+      max-request-size: 25MB
+
+campus:
+  upload-dir: ./data/uploads   # 上传的文件存这里
+  split:
+    size: 220                  # 每块目标 220 字（先照课程默认值，后面用实验来定）
+    overlap: 50                # 相邻块重叠 50 字
+  embedding:
+    provider: ${EMBEDDING_PROVIDER:openai}   # openai = 真模型；hash = 离线假向量（还没写）
+    model: ${EMBEDDING_MODEL:BAAI/bge-m3}    # 硅基流动上的免费向量模型
+    dim: ${EMBEDDING_DIM:1024}               # bge-m3 的维度，写错会报"维度不符"
+    base-url: ${EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${EMBEDDING_API_KEY:}           # 留空没关系，真正的值在 application-local.yml
+    batch-size: 16                           # 一次请求发多少条
+  llm:
+    base-url: ${LLM_BASE_URL:https://api.deepseek.com/v1}
+    model: ${LLM_MODEL:deepseek-chat}        # DeepSeek 的便宜模型，够用
+    api-key: ${DEEPSEEK_API_KEY:}            # 真正的值在 application-local.yml
+    temperature: 0.2                         # 低温度 = 更保守、更少胡说
+    max-tokens: 800
+    timeout-seconds: 60
+
+logging:
+  level:
+    com.campus.rag: debug      # 自己包的日志打详细点，方便看程序走到哪一步
