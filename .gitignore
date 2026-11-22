@@ -12,8 +12,12 @@ target/
 demo/src/main/resources/application-local.yml
 
 # ---------- 上传的文件副本（大，可由 docs-src 重新生成） ----------
-data/
-demo/data/
+# 注意：必须写 data/*（不能写 data/），否则 Git 不会进这个目录找例外
+data/*
+demo/data/*
+# 评测题集是"源码"不是"数据"，必须进 Git
+!data/testset/
+!data/testset/**
 
 # ---------- 语料原始 PDF（13.8 MB 二进制，用 OCR txt 代替入库） ----------
 docs-src/
