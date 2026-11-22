@@ -82,8 +82,8 @@ public class QaService {
     public QaAnswer ask(String question, int topK) {
         long begin = System.currentTimeMillis();
 
-        // ---------- 第 1 步：检索 ----------
-        List<RetrievalService.Hit> hits = retrievalService.search(question, topK);
+        // ---------- 第 1 步：检索（混合粗排 → 精排 → 展开邻居，详见 docs/08）----------
+        List<RetrievalService.Hit> hits = retrievalService.searchBest(question, topK);
         if (hits.isEmpty()) {
             return new QaAnswer(question,
                     "资料中没有找到相关规定，建议咨询学校相关职能部门。",
@@ -133,7 +133,7 @@ public class QaService {
 
     /** 调试用：只看检索 + 拼出来的提示词，不调模型（不花钱）。 */
     public Map<String, Object> preview(String question, int topK) {
-        List<RetrievalService.Hit> hits = retrievalService.search(question, topK);
+        List<RetrievalService.Hit> hits = retrievalService.searchBest(question, topK);
         Map<String, Object> data = new LinkedHashMap<>(promptBuilder.preview(question, hits));
         data.put("hitCount", hits.size());
         data.put("hits", hits);

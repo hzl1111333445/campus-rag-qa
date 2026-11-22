@@ -156,39 +156,55 @@ public class RetrievalService {
         return run(question, topK, mode, dedupe).hits();
     }
 
-    /** 评测里的一种"检索配置"= 检索方式 + 是否去重 + 是否加精排 */
-    public record Variant(String code, String label, SearchMode mode, boolean dedupe, boolean rerank) {
+    /** 评测里的一种"检索配置"= 检索方式 + 是否去重 + 是否合并相邻块 + 是否展开邻居 + 是否精排 */
+    public record Variant(String code, String label, SearchMode mode,
+                          boolean dedupe, boolean merge, boolean expand, boolean rerank) {
     }
 
     /**
-     * 评测用的五种配置。
+     * 评测用的九种配置。
      *
      * <p>前三种是三种检索方式（都开去重，等于线上行为）；
-     * 第四种是"混合 + 不去重"，专门用来量化去重的收益；
-     * 第五种是"混合 + 精排"，用来量化 Cross-Encoder 的收益。
+     * 第四种是"混合 + 不去重"，量化去重的收益；
+     * 第五种是"混合 + 精排"，量化 Cross-Encoder 的收益；
+     * 第六种是"混合 + 合并相邻块"，量化"把邻居拼回来再排名"的收益；
+     * 第七种是"合并 + 精排"，量化两者叠加；
+     * 第八、九种是"只展开邻居、不改排序"——排序仍用单块（精确），
+     * 但交给大模型/前端的内容是展开后的（完整），这是最贴近工程实践的做法。
      */
     public static final List<Variant> EVAL_VARIANTS = List.of(
-            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false),
-            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false),
-            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false),
-            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false),
-            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, true)
+            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false, false, false),
+            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false, false, false),
+            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false, false, false),
+            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false, false, false),
+            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, false, false, true),
+            new Variant("hybrid_merge", "混合 + 合并相邻块", SearchMode.HYBRID, true, true, false, false),
+            new Variant("hybrid_merge_rerank", "合并相邻块 + 精排", SearchMode.HYBRID, true, true, false, true),
+            new Variant("hybrid_expand", "混合 + 展开邻居", SearchMode.HYBRID, true, false, true, false),
+            new Variant("hybrid_rerank_expand", "精排 + 展开邻居", SearchMode.HYBRID, true, false, true, true)
     );
 
     /**
      * 一次预处理，跑完所有评测配置。
      *
-     * <p>36 题 × 5 种配置如果每题每种各调一次接口，就要向量化 180 次；
-     * 这里每题只向量化 1 次、读库 1 次，然后复用分数算 5 种排序
-     * （精排那一路另外要多调一次精排接口，这个省不掉）。
+     * <p>36 题 × 9 种配置如果每题每种各调一次接口，就要向量化 324 次；
+     * 这里每题只向量化 1 次、读库 1 次，然后复用分数算 9 种排序
+     * （精排那三路另外要多调精排接口，这个省不掉）。
      */
     public Map<String, List<Hit>> searchAllVariants(String question, int topK) {
         Prepared p = prepare(question);
         Map<String, List<Hit>> out = new LinkedHashMap<>();
         for (Variant v : EVAL_VARIANTS) {
-            out.put(v.code(), v.rerank()
-                    ? rerankedHits(p, topK, v.dedupe())
-                    : buildHits(p, topK, v.mode(), v.dedupe()));
+            List<Hit> hits;
+            if (v.merge()) {
+                hits = mergedHits(p, topK, v.dedupe(), v.rerank());
+            } else if (v.rerank()) {
+                hits = rerankedHits(p, topK, v.dedupe());
+            } else {
+                hits = buildHits(p, topK, v.mode(), v.dedupe());
+            }
+            // expand 只替换"内容"，不动排名：让模型/前端看到完整句子
+            out.put(v.code(), v.expand() ? expandHits(p, hits) : hits);
         }
         return out;
     }
@@ -237,6 +253,151 @@ public class RetrievalService {
     }
 
     /**
+     * 「混合粗排 → 合并相邻块 →（可选）精排 → 取前 K」。
+     *
+     * <p><b>为什么要把相邻块拼回来</b>：切分是机械的，一条规定很可能被切成两块——
+     * 比如《违纪处分条例》里「给予下列之一的处分：（1）警告……（5）开除学籍」，
+     * 切点正好落在冒号后面，于是「有哪几种处分」这个答案被劈成两半：
+     * 前一块只有"给予下列之一的处"，后一块才是清单。
+     * 单看任何一块都不完整，粗排和精排都容易判低。
+     *
+     * <p>做法：对每个候选块，把「前一块 + 自己 + 后一块」拼成一段更长的文本再送去排序。
+     * 这样模型能看到完整句子，评分自然更准。
+     *
+     * <p><b>代价</b>：
+     * <ul>
+     *   <li>送给模型的文本变长（约 3 倍），精排会慢一点</li>
+     *   <li>相邻块 overlap 有 50 字重复，拼起来会有冗余（已在下文注释说明为什么不特意去重）</li>
+     *   <li>两个候选块如果本来就是邻居，合并后内容会重叠 → 用「已占用的块区间」把后来的跳过</li>
+     * </ul>
+     */
+    private List<Hit> mergedHits(Prepared p, int topK, boolean dedupe, boolean withRerank) {
+        // 候选要比最终答案多，才有"合并"和"重排"的余地
+        int candidates = Math.max(topK + 2, rerankProperties.getCandidates());
+        List<Hit> pool = buildHits(p, candidates, SearchMode.HYBRID, dedupe);
+        if (pool.isEmpty()) {
+            return pool;
+        }
+
+        Map<String, Map<Integer, String>> contents = indexContents(p.chunks());
+        List<Hit> merged = new ArrayList<>(pool.size());
+        // 每份文档已经"占用"的块区间，用来避免两个候选合并出重复内容
+        Map<String, List<int[]>> occupied = new LinkedHashMap<>();
+
+        for (Hit h : pool) {
+            int from = h.chunkIndex() - 1;
+            int to = h.chunkIndex() + 1;
+            List<int[]> ranges = occupied.computeIfAbsent(h.documentTitle(), k -> new ArrayList<>());
+            boolean overlaps = false;
+            for (int[] r : ranges) {
+                if (!(to < r[0] || from > r[1])) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps) {
+                log.debug("合并相邻块：跳过 {} #{}（与已选内容重叠）", h.documentTitle(), h.chunkIndex());
+                continue;
+            }
+            ranges.add(new int[]{from, to});
+            merged.add(new Hit(h.chunkId(), h.documentTitle(), h.chunkIndex(), h.score(),
+                    joinNeighbors(contents.get(h.documentTitle()), h.chunkIndex())));
+        }
+        if (merged.isEmpty()) {
+            return merged;
+        }
+
+        if (!withRerank || !rerankClient.available()) {
+            return merged.size() <= topK ? merged : merged.subList(0, topK);
+        }
+
+        List<String> documents = new ArrayList<>(merged.size());
+        for (Hit h : merged) {
+            documents.add(rerankClient.truncate(h.content()));
+        }
+        double[] scores = rerankClient.scores(p.question(), documents);
+        if (scores == null) {
+            return merged.size() <= topK ? merged : merged.subList(0, topK);
+        }
+
+        List<Integer> order = RerankClient.orderByScoreDesc(scores);
+        List<Hit> out = new ArrayList<>(topK);
+        for (int rank = 0; rank < order.size() && out.size() < topK; rank++) {
+            Hit h = merged.get(order.get(rank));
+            out.add(new Hit(h.chunkId(), h.documentTitle(), h.chunkIndex(),
+                    Math.round(scores[order.get(rank)] * 10000) / 10000.0, h.content()));
+        }
+        return out;
+    }
+
+    /**
+     * 只把内容换成"展开邻居后的文本"，排名与分数完全不动。
+     *
+     * <p>这是与 {@link #mergedHits} 的关键区别：
+     * <ul>
+     *   <li>合并（merge）：先用"前中后三块"去排名 → 排序质量受影响（可能变好也可能变坏）</li>
+     *   <li>展开（expand）：先用单块排名（精确），再把内容补全 → 排序不变，但大模型看到的更完整</li>
+     * </ul>
+     * 工程上通常选后者：排序要的是"精"，给模型看要的是"全"。
+     */
+    private List<Hit> expandHits(Prepared p, List<Hit> hits) {
+        if (hits.isEmpty()) {
+            return hits;
+        }
+        Map<String, Map<Integer, String>> contents = indexContents(p.chunks());
+        List<Hit> out = new ArrayList<>(hits.size());
+        for (Hit h : hits) {
+            out.add(new Hit(h.chunkId(), h.documentTitle(), h.chunkIndex(), h.score(),
+                    joinNeighbors(contents.get(h.documentTitle()), h.chunkIndex())));
+        }
+        return out;
+    }
+
+    /** 建索引：文档标题 → (块序号 → 块正文)，用于快速取邻居 */
+    private Map<String, Map<Integer, String>> indexContents(List<DocumentDao.ChunkWithEmbedding> chunks) {        Map<String, Map<Integer, String>> out = new LinkedHashMap<>();
+        for (DocumentDao.ChunkWithEmbedding c : chunks) {
+            out.computeIfAbsent(c.documentTitle(), k -> new LinkedHashMap<>()).put(c.chunkIndex(), c.content());
+        }
+        return out;
+    }
+
+    /**
+     * 把前一块 + 自己 + 后一块拼起来。
+     *
+     * <p>为什么不在这里做"删掉重叠的 50 字"？因为块边界是按句号回退的，
+     * 重叠处并不总是恰好 50 字，机械删会切断句子。让模型看到少量重复，
+     * 比切断半句话的伤害小。
+     */
+    private String joinNeighbors(Map<Integer, String> byIndex, int index) {
+        if (byIndex == null || byIndex.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = index - 1; i <= index + 1; i++) {
+            String text = byIndex.get(i);
+            if (text == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append('\n');
+                // 邻居块的块头前缀（【标题 · 章节】）去掉：拼三段时留三个标题会把正文冲淡
+                // 自己的那块保留前缀（它是"这是哪份文件哪一章"的唯一线索）
+                text = CHUNK_PREFIX.matcher(text).replaceFirst("");
+            }
+            sb.append(text);
+        }
+        return sb.toString();
+    }
+
+    /** 块头前缀，形如「【文档标题 · 第X章 章节名】」，由 ChunkEnricher 生成 */
+    private static final java.util.regex.Pattern CHUNK_PREFIX = java.util.regex.Pattern.compile("^【[^】]*】\\s*");
+
+    /** 生产用入口：合并相邻块（可选精排），给搜索接口调 */
+    public List<Hit> searchMerged(String question, int topK, boolean withRerank) {
+        return mergedHits(prepare(question), topK, true, withRerank);
+    }
+
+    /**
      * 三路同时跑一遍，返回三种方式各自的结果（调效果用，也方便你直接对比）。
      *
      * <p>为什么三个一起做？因为向量化和读库都只做一次，
@@ -244,13 +405,35 @@ public class RetrievalService {
      */
     public List<ModeResult> compare(String question, int topK) {
         Prepared p = prepare(question);
-        List<ModeResult> out = new ArrayList<>(4);
+        List<ModeResult> out = new ArrayList<>(5);
         for (SearchMode mode : SearchMode.values()) {
             out.add(new ModeResult(mode.code(), mode.label(), buildHits(p, topK, mode)));
         }
         // 第四路：混合 + 精排（精排未启用时这里等价于混合结果）
         out.add(new ModeResult("hybrid_rerank", "混合 + 精排", rerankedHits(p, topK, true)));
+        // 第五路：精排 + 展开邻居 = 线上推荐方案（排序用单块，内容用三块）
+        out.add(new ModeResult("hybrid_rerank_expand", "精排 + 展开邻居", searchBest(question, topK)));
         return out;
+    }
+
+    /**
+     * 线上推荐方案：混合粗排 → 精排 → 展开邻居。
+     *
+     * <p>评测结论（32 道有效题，docs/08）：
+     * <ul>
+     *   <li>只精排：Recall@3 0.9688 / MRR 0.9063</li>
+     *   <li>只展开邻居：0.9375 / 0.9219</li>
+     *   <li><b>精排 + 展开邻居：0.9688 / 0.9375（两个指标同时最好）</b></li>
+     *   <li>先合并再精排：0.9063 / 0.8854 —— 明显更差，因为三块拼起来会把无关内容也喂给精排</li>
+     * </ul>
+     * 所以正确的顺序是「排序要精，给模型看要全」：排名用单块，内容用三块。
+     */
+    public List<Hit> searchBest(String question, int topK) {
+        Prepared p = prepare(question);
+        List<Hit> ranked = rerankClient.available()
+                ? rerankedHits(p, topK, true)
+                : buildHits(p, topK, SearchMode.HYBRID, true);
+        return expandHits(p, ranked);
     }
 
     /** 直接走"混合 + 精排"两阶段（给搜索接口用） */
