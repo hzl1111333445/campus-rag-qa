@@ -67,7 +67,7 @@ public class DocumentDao {
     /** 按 id 查一条文档（重新处理时要用 stored_name 去磁盘读原文件）。查不到返回 null。 */
     public Map<String, Object> findById(long id) {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id, original_name, stored_name, file_type, file_size, status, chunk_count " +
+                "SELECT id, title, original_name, stored_name, file_type, file_size, status, chunk_count " +
                         "FROM kb_document WHERE id = ?", id);
         return rows.isEmpty() ? null : rows.get(0);
     }

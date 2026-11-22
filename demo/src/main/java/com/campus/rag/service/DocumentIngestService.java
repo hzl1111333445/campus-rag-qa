@@ -22,6 +22,8 @@ public class DocumentIngestService {
     private final DocumentParser parser;
     private final DocumentDao documentDao;
     private final DocumentStorage storage;
+    /** 给每个块拼「文档标题 + 章节名」前缀，解决"块里没标题导致检索不到"。 */
+    private final ChunkEnricher chunkEnricher;
 
     /** 每块目标字符数。放配置里是为了以后做"切分参数对比实验"时能改。 */
     private final int chunkSize;
@@ -31,11 +33,13 @@ public class DocumentIngestService {
     public DocumentIngestService(DocumentParser parser,
                                  DocumentDao documentDao,
                                  DocumentStorage storage,
+                                 ChunkEnricher chunkEnricher,
                                  @Value("${campus.split.size:220}") int chunkSize,
                                  @Value("${campus.split.overlap:50}") int chunkOverlap) {
         this.parser = parser;
         this.documentDao = documentDao;
         this.storage = storage;
+        this.chunkEnricher = chunkEnricher;
         this.chunkSize = chunkSize;
         this.chunkOverlap = chunkOverlap;
     }
@@ -74,6 +78,11 @@ public class DocumentIngestService {
             String text = parser.parse(bytes, fileName);
             List<String> chunks = TextSplitter.split(text, chunkSize, chunkOverlap);
 
+            // 关键一步：给每个块拼上「文档标题 + 章节名」。
+            // 必须在入库前做——向量是在入库时算的，检索时再拼就晚了。
+            String title = titleOf(documentId, fileName);
+            chunks = chunkEnricher.enrich(title, chunks);
+
             // 先删旧块再插新块：这样同一个文件重复上传/重新切分不会留垃圾
             documentDao.deleteChunks(documentId);
 
@@ -97,5 +106,22 @@ public class DocumentIngestService {
             System.out.println("[ingest] 文档 " + documentId + " 处理失败：" + reason);
             return 0;
         }
+    }
+
+    /**
+     * 取文档标题（拼块头前缀用）。
+     *
+     * <p>优先用数据库里的 title（用户在页面上可能改过标题），
+     * 拿不到才退化成文件名去掉扩展名——所以这里不给异常，只做兜底。
+     */
+    private String titleOf(long documentId, String fileName) {
+        Map<String, Object> row = documentDao.findById(documentId);
+        if (row != null && row.get("title") != null) {
+            String t = String.valueOf(row.get("title")).trim();
+            if (!t.isEmpty()) {
+                return t;
+            }
+        }
+        return fileName == null ? "" : fileName.replaceFirst("(?i)\\.[^.]+$", "");
     }
 }
