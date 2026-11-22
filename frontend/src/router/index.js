@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import HealthView from '../views/HealthView.vue'
+import QaView from '../views/QaView.vue'
 import Placeholder from '../views/Placeholder.vue'
 
 /**
@@ -19,8 +20,8 @@ const routes = [
   {
     path: '/qa',
     name: 'qa',
-    component: Placeholder,
-    meta: { title: '智能问答', todo: '第 2 步：问答页（引用卡片 + 拒答徽章 + 流式输出）' }
+    component: QaView,
+    meta: { title: '智能问答' }
   },
   {
     path: '/documents',
