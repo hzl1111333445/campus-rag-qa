@@ -14,14 +14,25 @@ const http = axios.create({
   timeout: 60000
 })
 
-http.interceptors.response.use(
-  (resp) => resp.data,
-  (error) => {
-    const status = error.response?.status
-    const detail = error.response?.data?.message || error.message
-    ElMessage.error(status ? `请求失败（${status}）：${detail}` : `网络错误：${detail}`)
-    return Promise.reject(error)
-  }
-)
+function notifyError(error) {
+  const status = error.response?.status
+  const detail = error.response?.data?.message || error.message
+  ElMessage.error(status ? `请求失败（${status}）：${detail}` : `网络错误：${detail}`)
+}
+
+http.interceptors.response.use((resp) => resp.data, notifyError)
+
+/**
+ * 和 http 一模一样，但**不拆包**：返回完整的 axios 响应（含 headers）。
+ *
+ * 什么时候需要它？后端把"本次会话 id"放在响应头 X-Session-Id 里回传
+ * （这样返回体结构不变、老调用方零改动），前端就得读 header，用这个实例。
+ */
+export const httpRaw = axios.create({
+  baseURL: '/api',
+  timeout: 60000
+})
+
+httpRaw.interceptors.response.use((resp) => resp, notifyError)
 
 export default http

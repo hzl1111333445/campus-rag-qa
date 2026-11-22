@@ -25,6 +25,39 @@ CREATE TABLE IF NOT EXISTS kb_document (
     KEY idx_status (status)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '知识库文档';
 
+-- 会话表：一个"对话"= 一行。标题默认取第一句提问的前 20 个字，用户可以改名。
+-- 为什么要有这张表：学生问规章是连问的（"旷课怎么处分"→"那留校察看呢"），
+-- 没有会话概念的话前端一刷新就全没了，也做不了"历史上的问题"和后续的多轮理解。
+CREATE TABLE IF NOT EXISTS qa_session (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    title       VARCHAR(100)    NOT NULL                COMMENT '会话标题，默认取首问前 20 字',
+    create_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后一次提问时间，列表按它倒序',
+    PRIMARY KEY (id),
+    KEY idx_update_time (update_time)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '问答会话';
+
+-- 消息表：一轮问答 = 两行（user 一行、assistant 一行）。
+-- 除了文本，还把当次的"诚实性信号"和引用快照一起存下来：
+-- 这样重新打开历史会话时，出处卡片和校验徽章不用再去重新检索一遍（那会花时间甚至引用错位）。
+CREATE TABLE IF NOT EXISTS qa_message (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    session_id      BIGINT UNSIGNED NOT NULL,
+    role            VARCHAR(16)     NOT NULL                COMMENT 'user / assistant',
+    content         TEXT            NOT NULL                COMMENT '消息正文',
+    gated           TINYINT(1)      NOT NULL DEFAULT 0      COMMENT '是否检索层拒答',
+    citation_ok     TINYINT(1)      NULL                    COMMENT '引用编号是否都真实存在（仅 assistant 有）',
+    grounded        TINYINT(1)      NULL                    COMMENT '接地校验是否通过',
+    fact_count      INT             NULL                    COMMENT '核了几条硬事实',
+    top_score       DOUBLE          NULL                    COMMENT '本次最高精排分',
+    elapsed_ms      BIGINT          NULL                    COMMENT '本次耗时',
+    references_json MEDIUMTEXT      NULL                    COMMENT '引用块快照（JSON 数组）',
+    missing_facts   VARCHAR(1000)   NULL                    COMMENT '接地校验没找到的事实，顿号分隔',
+    create_time     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_session (session_id, id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '问答消息';
+
 -- 文本块表：一个文档切成 N 块 = N 行。这是 RAG 检索的最小单位。
 CREATE TABLE IF NOT EXISTS kb_chunk (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

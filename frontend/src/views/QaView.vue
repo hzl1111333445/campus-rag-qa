@@ -1,21 +1,24 @@
 <script setup>
 import { nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import http from '../api/http'
-
-const route = useRoute()
+import { ElMessage, ElMessageBox } from 'element-plus'
+import http, { httpRaw } from '../api/http'
 
 /**
- * 智能问答页（第 2 步·对话式 UI）。
+ * 智能问答页（第 2 步·对话式 UI + 会话管理）。
  *
  * 为什么做成聊天式而不是表单式？
  * 学生问规章是"一句接一句"的：先问"旷课多少学时处分"，接着问"那留校察看呢"。
- * 表单式每次都要清空重填，聊天式能自然承接上下文（后端还没有会话表，
- * 所以现在只做到"看得见历史对话"，真正的多轮理解放在第 5 步后端补）。
  *
- * 但 RAG 的诚实性信息不能因为做成聊天就丢掉，所以每条回答下面都保留：
- *   引用编号 chips（点开看原文）· 引用校验 · 接地校验（核了几条硬事实）· 是否拒答
+ * 会话从哪来？后端 qa_session / qa_message 两张表（第 3 步加的）：
+ *   - 每次提问自动落库，响应头 X-Session-Id 告诉前端这次属于哪个会话
+ *   - 左侧栏列出历史会话，点开加载历史消息（引用快照一起还原，不用重新检索）
+ *
+ * RAG 的诚实性信息不能因为做成聊天就丢掉，所以每条回答下面仍保留：
+ *   引用校验 · 接地校验（核了几条硬事实）· 是否拒答 · 可展开的原文出处
  */
+const route = useRoute()
+
 const examples = [
   '旷课多少学时会被处分？',
   '宿舍楼晚上几点关门？',
@@ -23,7 +26,10 @@ const examples = [
   '国家助学金一年多少钱？'
 ]
 
+/** 消息列表：[{ id, role:'user'|'assistant', text?, data?, loading?, error? }] */
 const messages = ref([])
+const sessions = ref([])
+const sessionId = ref(null)
 const input = ref('')
 const topK = ref(3)
 const sending = ref(false)
@@ -45,6 +51,103 @@ function scrollToBottom() {
   })
 }
 
+/* ==================== 会话管理 ==================== */
+
+async function loadSessions() {
+  try {
+    const data = await http.get('/session', { params: { limit: 50 } })
+    sessions.value = data.items || []
+  } catch {
+    /* 列表拉不到不影响提问，http 拦截器已经弹过提示 */
+  }
+}
+
+async function newSession() {
+  sessionId.value = null
+  messages.value = []
+  refsOpen.value = {}
+  input.value = ''
+}
+
+/** 打开历史会话：把存下来的消息还原成当前的消息数组（含引用快照）。 */
+async function openSession(s) {
+  if (sending.value) return
+  try {
+    const data = await http.get(`/session/${s.id}/messages`)
+    sessionId.value = s.id
+    refsOpen.value = {}
+    messages.value = (data.messages || []).map((m) => {
+      if (m.role === 'user') {
+        return { id: nextId(), role: 'user', text: m.content }
+      }
+      return { id: nextId(), role: 'assistant', data: toAnswer(m) }
+    })
+    scrollToBottom()
+  } catch {
+    /* 已在拦截器提示 */
+  }
+}
+
+/** 数据库一行 → 页面用的回答结构（字段名从 snake_case 转 camelCase）。 */
+function toAnswer(m) {
+  let refs = []
+  if (m.references_json) {
+    try {
+      refs = JSON.parse(m.references_json)
+    } catch {
+      refs = []
+    }
+  }
+  return {
+    answer: m.content,
+    gated: !!m.gated,
+    citationOk: m.citation_ok !== null && m.citation_ok !== undefined ? !!m.citation_ok : true,
+    grounded: m.grounded !== null && m.grounded !== undefined ? !!m.grounded : true,
+    factCount: m.fact_count || 0,
+    topScore: m.top_score,
+    elapsedMs: m.elapsed_ms,
+    retrievedCount: refs.length,
+    references: refs,
+    missingFacts: m.missing_facts ? String(m.missing_facts).split('、') : [],
+    invalidCitations: []
+  }
+}
+
+async function renameSession(s) {
+  try {
+    const { value } = await ElMessageBox.prompt('给这个对话起个名字', '重命名', {
+      inputValue: s.title,
+      inputValidator: (v) => (v && v.trim() ? true : '标题不能为空'),
+      confirmButtonText: '保存',
+      cancelButtonText: '取消'
+    })
+    await http.patch(`/session/${s.id}`, { title: value.trim() })
+    await loadSessions()
+  } catch {
+    /* 用户点了取消 */
+  }
+}
+
+async function removeSession(s) {
+  try {
+    await ElMessageBox.confirm(`删除「${s.title}」及其全部对话？`, '删除对话', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+    await http.delete(`/session/${s.id}`)
+    if (sessionId.value === s.id) {
+      await newSession()
+    }
+    await loadSessions()
+    ElMessage.success('已删除')
+  } catch {
+    /* 取消 */
+  }
+}
+
+/* ==================== 提问 ==================== */
+
 async function send(text) {
   const q = (text ?? input.value).trim()
   if (!q || sending.value) return
@@ -57,7 +160,18 @@ async function send(text) {
   scrollToBottom()
 
   try {
-    const data = await http.post('/qa', { question: q, topK: topK.value })
+    // httpRaw：返回完整响应，才能读到响应头里的 X-Session-Id
+    const resp = await httpRaw.post('/qa', {
+      question: q,
+      topK: topK.value,
+      sessionId: sessionId.value
+    })
+    const data = resp.data
+    const sid = resp.headers['x-session-id']
+    if (sid && String(sid) !== String(sessionId.value)) {
+      sessionId.value = Number(sid)
+      loadSessions()
+    }
     const idx = messages.value.findIndex((m) => m.id === replyId)
     if (idx >= 0) messages.value[idx] = { id: replyId, role: 'assistant', data }
   } catch (e) {
@@ -76,12 +190,6 @@ function onEnter(e) {
   send()
 }
 
-function reset() {
-  messages.value = []
-  refsOpen.value = {}
-  input.value = ''
-}
-
 function toggleRefs(id) {
   refsOpen.value = { ...refsOpen.value, [id]: !refsOpen.value[id] }
 }
@@ -89,10 +197,13 @@ function toggleRefs(id) {
 async function copyAnswer(text) {
   try {
     await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制')
   } catch {
     /* 浏览器不允许剪贴板时静默失败，不弹窗打扰 */
   }
 }
+
+/* ==================== 展示工具 ==================== */
 
 function paragraphs(text) {
   if (!text) return []
@@ -115,179 +226,309 @@ function groundedTag(data) {
   return { type: 'success', text: `接地通过 · 核了 ${data.factCount} 条` }
 }
 
-/**
- * 支持 /qa?q=问题 直接提问，用于分享/收藏一个问题，也方便截图与自动化测试。
- * （不模拟假数据：问的仍然是真接口。）
- */
-onMounted(() => {
+/** 列表里的时间：今天显示 HH:mm，其余显示 M-D */
+function timeText(t) {
+  if (!t) return ''
+  const d = new Date(String(t).replace(' ', 'T'))
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  const sameDay = d.toDateString() === now.toDateString()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return sameDay ? `${hh}:${mm}` : `${d.getMonth() + 1}-${d.getDate()}`
+}
+
+onMounted(async () => {
+  await loadSessions()
+  // /qa?session=3 直接打开某个历史会话（方便分享一条对话链接）
+  const sid = route.query.session
+  if (typeof sid === 'string' && sid.trim()) {
+    await openSession({ id: Number(sid) })
+    return
+  }
+  // /qa?q=问题 直接提问（分享/收藏一个问题，也用于截图与自动化测试）
   const q = route.query.q
   if (typeof q === 'string' && q.trim()) send(q)
 })
 </script>
 
 <template>
-  <div class="chat">
-    <!-- 顶部工具条 -->
-    <div class="chat-top">
-      <div class="top-left">
-        <span class="top-title">智能问答</span>
-        <span class="top-sub">只依据校内规章作答，答案可追溯到原文</span>
+  <div class="chat-wrap">
+    <!-- 左：会话列表 -->
+    <aside class="sessions">
+      <div class="sessions-head">
+        <span class="sessions-title">对话</span>
+        <el-button size="small" type="primary" plain @click="newSession">+ 新对话</el-button>
       </div>
-      <div class="top-right">
-        <span class="top-label">资料条数</span>
-        <el-select v-model="topK" size="small" style="width: 76px">
-          <el-option v-for="n in [3, 4, 5, 8]" :key="n" :label="n" :value="n" />
-        </el-select>
-        <el-button v-if="messages.length" size="small" text @click="reset">新会话</el-button>
+      <div class="sessions-list">
+        <div
+          v-for="s in sessions"
+          :key="s.id"
+          class="session-item"
+          :class="{ active: s.id === sessionId }"
+          @click="openSession(s)"
+        >
+          <div class="session-title">{{ s.title }}</div>
+          <div class="session-meta">{{ s.message_count }} 条 · {{ timeText(s.update_time) }}</div>
+          <div class="session-ops">
+            <button class="op" @click.stop="renameSession(s)">改名</button>
+            <button class="op danger" @click.stop="removeSession(s)">删除</button>
+          </div>
+        </div>
+        <div v-if="!sessions.length" class="sessions-empty">还没有对话，问一句就有了</div>
       </div>
-    </div>
+      <div class="sessions-foot">会话存在数据库里，换设备也能看到</div>
+    </aside>
 
-    <!-- 消息流 -->
-    <div ref="scrollBox" class="chat-body">
-      <!-- 空态：欢迎 + 示例问题 -->
-      <div v-if="!messages.length" class="welcome">
-        <div class="welcome-icon">规</div>
-        <h2 class="welcome-title">有什么想问的？</h2>
-        <p class="welcome-sub">
-          课程、学籍、奖惩、宿舍、资助等校内规章都能问。<br />
-          系统会先把相关条款检索出来，再让大模型照着条款作答，答不出会直接说"没查到"。
-        </p>
-        <div class="examples">
-          <button v-for="q in examples" :key="q" class="example" @click="send(q)">
-            {{ q }}
-          </button>
+    <!-- 右：对话主区 -->
+    <section class="chat-main">
+      <div class="chat-top">
+        <div class="top-left">
+          <span class="top-title">智能问答</span>
+          <span class="top-sub">只依据校内规章作答，答案可追溯到原文</span>
+        </div>
+        <div class="top-right">
+          <span class="top-label">资料条数</span>
+          <el-select v-model="topK" size="small" style="width: 76px">
+            <el-option v-for="n in [3, 4, 5, 8]" :key="n" :label="n" :value="n" />
+          </el-select>
         </div>
       </div>
 
-      <!-- 对话 -->
-      <div v-for="m in messages" :key="m.id" class="row" :class="m.role">
-        <template v-if="m.role === 'user'">
-          <div class="bubble user-bubble">{{ m.text }}</div>
-          <div class="avatar user-avatar">我</div>
-        </template>
-
-        <template v-else>
-          <div class="avatar ai-avatar">AI</div>
-
-          <!-- 生成中 -->
-          <div v-if="m.loading" class="bubble ai-bubble">
-            <div class="typing">
-              <span></span><span></span><span></span>
-              <em class="typing-text">正在检索规章并生成回答…</em>
-            </div>
+      <div ref="scrollBox" class="chat-body">
+        <!-- 空态 -->
+        <div v-if="!messages.length" class="welcome">
+          <div class="welcome-icon">规</div>
+          <h2 class="welcome-title">有什么想问的？</h2>
+          <p class="welcome-sub">
+            课程、学籍、奖惩、宿舍、资助等校内规章都能问。<br />
+            系统会先把相关条款检索出来，再让大模型照着条款作答，答不出会直接说"没查到"。
+          </p>
+          <div class="examples">
+            <button v-for="q in examples" :key="q" class="example" @click="send(q)">
+              {{ q }}
+            </button>
           </div>
+        </div>
 
-          <!-- 出错 -->
-          <div v-else-if="m.error" class="bubble ai-bubble error-bubble">
-            <div class="error-title">请求失败</div>
-            <div class="error-msg">{{ m.error }}</div>
-          </div>
+        <!-- 对话 -->
+        <div v-for="m in messages" :key="m.id" class="row" :class="m.role">
+          <template v-if="m.role === 'user'">
+            <div class="bubble user-bubble">{{ m.text }}</div>
+            <div class="avatar user-avatar">我</div>
+          </template>
 
-          <!-- 正常回答 -->
-          <div v-else class="bubble ai-bubble">
-            <div class="answer-head">
-              <el-tag v-if="m.data.gated" type="warning" size="small" effect="dark">未检索到相关资料</el-tag>
-              <el-tag :type="m.data.citationOk ? 'success' : 'danger'" size="small">
-                {{ m.data.citationOk ? '引用校验通过' : '引用编号异常' }}
-              </el-tag>
-              <el-tag :type="groundedTag(m.data).type" size="small">{{ groundedTag(m.data).text }}</el-tag>
-            </div>
+          <template v-else>
+            <div class="avatar ai-avatar">AI</div>
 
-            <div class="answer-body">
-              <p v-for="(p, i) in paragraphs(m.data.answer)" :key="i">{{ p }}</p>
-            </div>
-
-            <!-- 引用 chips：点开看原文 -->
-            <div v-if="m.data.references?.length" class="cites">
-              <span class="cites-label">出处</span>
-              <button
-                v-for="r in m.data.references"
-                :key="r.index"
-                class="cite"
-                :class="{ active: refsOpen[m.id] }"
-                :title="`《${r.documentTitle}》第 ${r.chunkIndex} 块`"
-                @click="toggleRefs(m.id)"
-              >
-                [{{ r.index }}] {{ docTitle(r.documentTitle) }}
-              </button>
-              <button class="cite-toggle" @click="toggleRefs(m.id)">
-                {{ refsOpen[m.id] ? '收起原文' : '看原文' }}
-              </button>
-            </div>
-
-            <!-- 展开的原文卡片 -->
-            <div v-if="refsOpen[m.id]" class="ref-list">
-              <div v-for="r in m.data.references" :key="r.index" class="ref-card">
-                <div class="ref-head">
-                  <span class="ref-index">[{{ r.index }}]</span>
-                  <span class="ref-doc">《{{ docTitle(r.documentTitle) }}》</span>
-                  <span class="ref-chunk">第 {{ r.chunkIndex }} 块</span>
-                  <span class="ref-score">相关度 {{ scoreText(r.score) }}</span>
-                </div>
-                <div class="ref-content">{{ r.content }}</div>
+            <div v-if="m.loading" class="bubble ai-bubble">
+              <div class="typing">
+                <span></span><span></span><span></span>
+                <em class="typing-text">正在检索规章并生成回答…</em>
               </div>
             </div>
 
-            <!-- 告警 -->
-            <div v-if="m.data.invalidCitations?.length" class="warn warn-danger">
-              模型写出了不存在的引用编号：{{ m.data.invalidCitations.join('、') }}（资料只有 {{ m.data.retrievedCount }} 条）
-            </div>
-            <div v-if="m.data.missingFacts?.length" class="warn warn-warn">
-              以下事实在被引用原文中找不到，可能是模型自行补充：{{ m.data.missingFacts.join('、') }}
+            <div v-else-if="m.error" class="bubble ai-bubble error-bubble">
+              <div class="error-title">请求失败</div>
+              <div class="error-msg">{{ m.error }}</div>
             </div>
 
-            <div class="answer-foot">
-              <span class="foot-meta">
-{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms
-              </span>
-              <span class="foot-actions">
-                <button class="foot-btn" @click="copyAnswer(m.data.answer)">复制</button>
-                <button class="foot-btn" @click="toggleRefs(m.id)">溯源</button>
-              </span>
-            </div>
-          </div>
-        </template>
-      </div>
-    </div>
+            <div v-else class="bubble ai-bubble">
+              <div class="answer-head">
+                <el-tag v-if="m.data.gated" type="warning" size="small" effect="dark">未检索到相关资料</el-tag>
+                <el-tag :type="m.data.citationOk ? 'success' : 'danger'" size="small">
+                  {{ m.data.citationOk ? '引用校验通过' : '引用编号异常' }}
+                </el-tag>
+                <el-tag :type="groundedTag(m.data).type" size="small">{{ groundedTag(m.data).text }}</el-tag>
+              </div>
 
-    <!-- 输入区（吸底） -->
-    <div class="chat-input">
-      <div class="input-box">
-        <el-input
-          v-model="input"
-          type="textarea"
-          :autosize="{ minRows: 1, maxRows: 5 }"
-          resize="none"
-          maxlength="200"
-          placeholder="用大白话问，例如：旷课多少学时会被处分？（Enter 发送 / Shift + Enter 换行）"
-          @keydown="onEnter"
-        />
-        <el-button
-          class="send-btn"
-          type="primary"
-          :disabled="!input.trim() || sending"
-          :loading="sending"
-          @click="send()"
-        >
-          发送
-        </el-button>
+              <div class="answer-body">
+                <p v-for="(p, i) in paragraphs(m.data.answer)" :key="i">{{ p }}</p>
+              </div>
+
+              <div v-if="m.data.references?.length" class="cites">
+                <span class="cites-label">出处</span>
+                <button
+                  v-for="r in m.data.references"
+                  :key="r.index"
+                  class="cite"
+                  :class="{ active: refsOpen[m.id] }"
+                  :title="`《${docTitle(r.documentTitle)}》第 ${r.chunkIndex} 块`"
+                  @click="toggleRefs(m.id)"
+                >
+                  [{{ r.index }}] {{ docTitle(r.documentTitle) }}
+                </button>
+                <button class="cite-toggle" @click="toggleRefs(m.id)">
+                  {{ refsOpen[m.id] ? '收起原文' : '看原文' }}
+                </button>
+              </div>
+
+              <div v-if="refsOpen[m.id]" class="ref-list">
+                <div v-for="r in m.data.references" :key="r.index" class="ref-card">
+                  <div class="ref-head">
+                    <span class="ref-index">[{{ r.index }}]</span>
+                    <span class="ref-doc">《{{ docTitle(r.documentTitle) }}》</span>
+                    <span class="ref-chunk">第 {{ r.chunkIndex }} 块</span>
+                    <span class="ref-score">相关度 {{ scoreText(r.score) }}</span>
+                  </div>
+                  <div class="ref-content">{{ r.content }}</div>
+                </div>
+              </div>
+
+              <div v-if="m.data.invalidCitations?.length" class="warn warn-danger">
+                模型写出了不存在的引用编号：{{ m.data.invalidCitations.join('、') }}（资料只有 {{ m.data.retrievedCount }} 条）
+              </div>
+              <div v-if="m.data.missingFacts?.length" class="warn warn-warn">
+                以下事实在被引用原文中找不到，可能是模型自行补充：{{ m.data.missingFacts.join('、') }}
+              </div>
+
+              <div class="answer-foot">
+                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms</span>
+                <span class="foot-actions">
+                  <button class="foot-btn" @click="copyAnswer(m.data.answer)">复制</button>
+                  <button class="foot-btn" @click="toggleRefs(m.id)">溯源</button>
+                </span>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
-      <div class="input-tip">回答只依据校内规章原文，请以官方文件为准；涉及个人情况请咨询对应部门。</div>
-    </div>
+
+      <div class="chat-input">
+        <div class="input-box">
+          <el-input
+            v-model="input"
+            type="textarea"
+            :autosize="{ minRows: 1, maxRows: 5 }"
+            resize="none"
+            maxlength="200"
+            placeholder="用大白话问，例如：旷课多少学时会被处分？（Enter 发送 / Shift + Enter 换行）"
+            @keydown="onEnter"
+          />
+          <el-button
+            class="send-btn"
+            type="primary"
+            :disabled="!input.trim() || sending"
+            :loading="sending"
+            @click="send()"
+          >
+            发送
+          </el-button>
+        </div>
+        <div class="input-tip">回答只依据校内规章原文，请以官方文件为准；涉及个人情况请咨询对应部门。</div>
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.chat {
+.chat-wrap {
   display: flex;
-  flex-direction: column;
   height: calc(100vh - 92px);
   background: #f7f8fa;
   border-radius: 8px;
   overflow: hidden;
 }
 
-/* ---------- 顶部 ---------- */
+/* ---------- 左侧会话栏 ---------- */
+.sessions {
+  width: 236px;
+  flex: none;
+  background: #fff;
+  border-right: 1px solid #ebeef5;
+  display: flex;
+  flex-direction: column;
+}
+.sessions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid #f0f2f5;
+}
+.sessions-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+.sessions-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.session-item {
+  position: relative;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+.session-item:hover {
+  background: #f5f7fa;
+}
+.session-item.active {
+  background: #eaf2ff;
+}
+.session-title {
+  font-size: 13px;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-meta {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #a8abb2;
+}
+.session-ops {
+  display: none;
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  gap: 4px;
+}
+.session-item:hover .session-ops {
+  display: flex;
+}
+.op {
+  border: none;
+  background: #fff;
+  color: #909399;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.op:hover {
+  color: #1f6feb;
+}
+.op.danger:hover {
+  color: #f56c6c;
+}
+.sessions-empty {
+  padding: 16px 8px;
+  font-size: 12px;
+  color: #c0c4cc;
+  text-align: center;
+}
+.sessions-foot {
+  padding: 8px 12px;
+  border-top: 1px solid #f0f2f5;
+  font-size: 11px;
+  color: #c0c4cc;
+}
+
+/* ---------- 右侧主区 ---------- */
+.chat-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶部 */
 .chat-top {
   display: flex;
   align-items: center;
@@ -317,7 +558,7 @@ onMounted(() => {
   color: #909399;
 }
 
-/* ---------- 消息流 ---------- */
+/* 消息流 */
 .chat-body {
   flex: 1;
   overflow-y: auto;
@@ -552,7 +793,7 @@ onMounted(() => {
   color: #a33;
 }
 
-/* ---------- 空态 ---------- */
+/* 空态 */
 .welcome {
   height: 100%;
   display: flex;
@@ -609,7 +850,7 @@ onMounted(() => {
   background: #f2f7ff;
 }
 
-/* ---------- 输入区 ---------- */
+/* 输入区 */
 .chat-input {
   flex: none;
   padding: 10px 18px 12px;
