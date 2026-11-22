@@ -36,7 +36,9 @@ public class AuthInterceptor implements HandlerInterceptor {
     private static final List<String> ADMIN_PREFIXES = List.of(
             "/api/document",
             "/api/dev",
-            "/api/eval"
+            "/api/eval",
+            // 检索调试接口会暴露内部分数、改写句与阈值，属于"调参工具"，不对学生开放
+            "/api/search"
     );
 
     /** 这些前缀下的接口必须登录（但不需要管理员） */

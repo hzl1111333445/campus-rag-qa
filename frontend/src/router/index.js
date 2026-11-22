@@ -5,6 +5,7 @@ import QaView from '../views/QaView.vue'
 import DocView from '../views/DocView.vue'
 import LoginView from '../views/LoginView.vue'
 import Placeholder from '../views/Placeholder.vue'
+import DebugView from '../views/DebugView.vue'
 import { isAdmin, isLoggedIn } from '../store/auth'
 
 /**
@@ -44,8 +45,8 @@ const routes = [
   {
     path: '/debug',
     name: 'debug',
-    component: Placeholder,
-    meta: { title: '检索调试', adminOnly: true, todo: '第 4 步：五路检索对比 + 分数 + 改写前后' }
+    component: DebugView,
+    meta: { title: '检索调试', adminOnly: true }
   },
   {
     path: '/eval',
