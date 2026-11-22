@@ -47,8 +47,10 @@ public class QaService {
      * @param documentTitle 出自哪个文档
      * @param chunkIndex    第几块
      * @param score         检索时的相似度分数
+     * @param content       这一块的原文（前端引用卡片要显示，用户才能自己核对"答案对不对"）
      */
-    public record Reference(int index, long chunkId, String documentTitle, int chunkIndex, double score) {
+    public record Reference(int index, long chunkId, String documentTitle, int chunkIndex,
+                            double score, String content) {
     }
 
     /**
@@ -121,7 +123,8 @@ public class QaService {
         List<Reference> references = new ArrayList<>();
         for (int n : cited) {
             RetrievalService.Hit h = hits.get(n - 1);
-            references.add(new Reference(n, h.chunkId(), h.documentTitle(), h.chunkIndex(), h.score()));
+            references.add(new Reference(n, h.chunkId(), h.documentTitle(), h.chunkIndex(),
+                    h.score(), h.content()));
         }
 
         return new QaAnswer(question, answer, chatClient.model(), references, hits.size(),
