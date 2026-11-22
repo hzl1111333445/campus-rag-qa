@@ -1,5 +1,7 @@
 package com.campus.rag.service;
 
+import com.campus.rag.config.RerankProperties;
+import com.campus.rag.service.RerankClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -45,6 +47,9 @@ public class RetrievalService {
     private final EmbeddingClient embeddingClient;
     private final DocumentDao documentDao;
     private final EmbeddingService embeddingService;
+    /** 精排客户端：拿候选块去问 Cross-Encoder "这条能不能回答问题" */
+    private final RerankClient rerankClient;
+    private final RerankProperties rerankProperties;
 
     /** 混合检索里向量这一路的权重（0~1），BM25 那一路是 1 减它 */
     private final double hybridWeightVector;
@@ -59,11 +64,15 @@ public class RetrievalService {
     public RetrievalService(EmbeddingClient embeddingClient,
                             DocumentDao documentDao,
                             EmbeddingService embeddingService,
+                            RerankClient rerankClient,
+                            RerankProperties rerankProperties,
                             @Value("${campus.retrieval.hybrid-w-vector:0.2}") double hybridWeightVector,
                             @Value("${campus.retrieval.mode:hybrid}") String defaultMode) {
         this.embeddingClient = embeddingClient;
         this.documentDao = documentDao;
         this.embeddingService = embeddingService;
+        this.rerankClient = rerankClient;
+        this.rerankProperties = rerankProperties;
         this.hybridWeightVector = hybridWeightVector;
         this.defaultMode = SearchMode.from(defaultMode);
     }
@@ -147,34 +156,82 @@ public class RetrievalService {
         return run(question, topK, mode, dedupe).hits();
     }
 
-    /** 评测里的一种"检索配置"= 检索方式 + 是否去重 */
-    public record Variant(String code, String label, SearchMode mode, boolean dedupe) {
+    /** 评测里的一种"检索配置"= 检索方式 + 是否去重 + 是否加精排 */
+    public record Variant(String code, String label, SearchMode mode, boolean dedupe, boolean rerank) {
     }
 
     /**
-     * 评测用的四种配置。
+     * 评测用的五种配置。
      *
-     * <p>前三列是三种检索方式（都开去重，等于线上行为）；
-     * 第四列是"混合 + 不去重"，专门用来量化去重的收益。
+     * <p>前三种是三种检索方式（都开去重，等于线上行为）；
+     * 第四种是"混合 + 不去重"，专门用来量化去重的收益；
+     * 第五种是"混合 + 精排"，用来量化 Cross-Encoder 的收益。
      */
     public static final List<Variant> EVAL_VARIANTS = List.of(
-            new Variant("vector", "纯向量", SearchMode.VECTOR, true),
-            new Variant("bm25", "纯 BM25", SearchMode.BM25, true),
-            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true),
-            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false)
+            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false),
+            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false),
+            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false),
+            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false),
+            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, true)
     );
 
     /**
      * 一次预处理，跑完所有评测配置。
      *
-     * <p>36 题 × 4 种配置如果每题每种各调一次接口，就要向量化 144 次；
-     * 这里每题只向量化 1 次、读库 1 次，然后复用分数算 4 种排序。
+     * <p>36 题 × 5 种配置如果每题每种各调一次接口，就要向量化 180 次；
+     * 这里每题只向量化 1 次、读库 1 次，然后复用分数算 5 种排序
+     * （精排那一路另外要多调一次精排接口，这个省不掉）。
      */
     public Map<String, List<Hit>> searchAllVariants(String question, int topK) {
         Prepared p = prepare(question);
         Map<String, List<Hit>> out = new LinkedHashMap<>();
         for (Variant v : EVAL_VARIANTS) {
-            out.put(v.code(), buildHits(p, topK, v.mode(), v.dedupe()));
+            out.put(v.code(), v.rerank()
+                    ? rerankedHits(p, topK, v.dedupe())
+                    : buildHits(p, topK, v.mode(), v.dedupe()));
+        }
+        return out;
+    }
+
+    /**
+     * 「混合粗排 → 精排 → 取前 K」的完整两阶段流程。
+     *
+     * <p>三步：
+     * <ol>
+     *   <li>粗排：混合 RRF 先排出候选（默认 10 条，比最终要返回的多，给精排留余地）</li>
+     *   <li>精排：把候选逐条和问题一起送给 Cross-Encoder，拿回相关性分数</li>
+     *   <li>重排：按精排分数重新排序，取前 K</li>
+     * </ol>
+     *
+     * <p>精排不可用或调用失败时<b>自动降级</b>为粗排结果，不会抛异常。
+     */
+    private List<Hit> rerankedHits(Prepared p, int topK, boolean dedupe) {
+        int candidates = Math.max(topK, rerankProperties.getCandidates());
+        List<Hit> pool = buildHits(p, candidates, SearchMode.HYBRID, dedupe);
+        if (pool.isEmpty()) {
+            return pool;
+        }
+        if (!rerankClient.available()) {
+            log.debug("精排未启用，直接用混合结果");
+            return pool.size() <= topK ? pool : pool.subList(0, topK);
+        }
+
+        List<String> documents = new ArrayList<>(pool.size());
+        for (Hit h : pool) {
+            documents.add(rerankClient.truncate(h.content()));
+        }
+        double[] scores = rerankClient.scores(p.question(), documents);
+        if (scores == null) {
+            // 降级：保持粗排顺序，只截到 topK
+            return pool.size() <= topK ? pool : pool.subList(0, topK);
+        }
+
+        List<Integer> order = RerankClient.orderByScoreDesc(scores);
+        List<Hit> out = new ArrayList<>(topK);
+        for (int rank = 0; rank < order.size() && out.size() < topK; rank++) {
+            Hit h = pool.get(order.get(rank));
+            out.add(new Hit(h.chunkId(), h.documentTitle(), h.chunkIndex(),
+                    Math.round(scores[order.get(rank)] * 10000) / 10000.0, h.content()));
         }
         return out;
     }
@@ -187,11 +244,18 @@ public class RetrievalService {
      */
     public List<ModeResult> compare(String question, int topK) {
         Prepared p = prepare(question);
-        List<ModeResult> out = new ArrayList<>(3);
+        List<ModeResult> out = new ArrayList<>(4);
         for (SearchMode mode : SearchMode.values()) {
             out.add(new ModeResult(mode.code(), mode.label(), buildHits(p, topK, mode)));
         }
+        // 第四路：混合 + 精排（精排未启用时这里等价于混合结果）
+        out.add(new ModeResult("hybrid_rerank", "混合 + 精排", rerankedHits(p, topK, true)));
         return out;
+    }
+
+    /** 直接走"混合 + 精排"两阶段（给搜索接口用） */
+    public List<Hit> searchReranked(String question, int topK) {
+        return rerankedHits(prepare(question), topK, true);
     }
 
     /** 内部统一返回值：一次 prepare，多种方式复用 */

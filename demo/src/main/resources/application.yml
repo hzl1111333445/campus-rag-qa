@@ -43,6 +43,17 @@ campus:
     temperature: 0.2                         # 低温度 = 更保守、更少胡说
     max-tokens: 800
     timeout-seconds: 60
+  # ---------- 精排（rerank）----------
+  # 粗排（向量/BM25）只看"像不像"，精排（Cross-Encoder）看"这段能不能回答问题"。
+  # 两道 badcase（正确块排第 4 名）就是靠它修。
+  rerank:
+    enabled: ${RERANK_ENABLED:false}          # 关掉时检索照常工作，只是没有精排这一步
+    base-url: ${RERANK_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${RERANK_API_KEY:}               # 真正的值在 application-local.yml
+    model: ${RERANK_MODEL:BAAI/bge-reranker-v2-m3}
+    candidates: 10                            # 送给精排的候选数（badcase 在第 4 名，10 足够）
+    max-doc-chars: 600                        # 单条文档截断长度
+    timeout-seconds: 15                       # 超时就降级为粗排结果
 
 logging:
   level:
