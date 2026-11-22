@@ -85,6 +85,7 @@ public class RetrievalService {
 
     /** BM25 信号弱时，向量权重上调到多少 */
     private final double weakWVector;
+    private final double fusionWRewritten;
 
     /** BM25 索引缓存：它的构建要遍历所有块，不能每次查询都重建 */
     private volatile Bm25Index bm25Cache;
@@ -105,7 +106,8 @@ public class RetrievalService {
                             @Value("${campus.retrieval.min-score-hybrid:0.0}") double minScoreHybrid,
                             @Value("${campus.retrieval.adaptive:false}") boolean adaptiveWeights,
                             @Value("${campus.retrieval.bm25-strong-avg:1.5}") double bm25StrongAvg,
-                            @Value("${campus.retrieval.weak-w-vector:0.7}") double weakWVector) {
+                            @Value("${campus.retrieval.weak-w-vector:0.7}") double weakWVector,
+                            @Value("${campus.rewrite.fusion-w-rewritten:0.5}") double fusionWRewritten) {
         this.embeddingClient = embeddingClient;
         this.documentDao = documentDao;
         this.embeddingService = embeddingService;
@@ -119,6 +121,7 @@ public class RetrievalService {
         this.adaptiveWeights = adaptiveWeights;
         this.bm25StrongAvg = bm25StrongAvg;
         this.weakWVector = weakWVector;
+        this.fusionWRewritten = fusionWRewritten;
     }
 
     /**
@@ -243,14 +246,20 @@ public class RetrievalService {
         return run(question, topK, mode, dedupe).hits();
     }
 
-    /** 评测里的一种"检索配置"= 检索方式 + 是否去重 + 是否合并相邻块 + 是否展开邻居 + 是否精排 */
+    /**
+     * 评测里的一种"检索配置"= 检索方式 + 是否去重 + 是否合并相邻块 + 是否展开邻居 + 是否精排 + 查询改写方式
+     *
+     * <p>{@code rewrite}：BM25 一路用改写句（向量路仍用原句）；
+     * {@code rewriteFusion}：原句与改写句各排一次，两路名次再做一次 RRF 合并。
+     * 后者是为了修掉"改写把本来对的题弄坏"这类退化（典型：#54）。
+     */
     public record Variant(String code, String label, SearchMode mode,
                           boolean dedupe, boolean merge, boolean expand, boolean rerank,
-                          boolean rewrite) {
+                          boolean rewrite, boolean rewriteFusion) {
     }
 
     /**
-     * 评测用的九种配置。
+     * 评测用的十三种配置。
      *
      * <p>前三种是三种检索方式（都开去重，等于线上行为）；
      * 第四种是"混合 + 不去重"，量化去重的收益；
@@ -258,21 +267,25 @@ public class RetrievalService {
      * 第六种是"混合 + 合并相邻块"，量化"把邻居拼回来再排名"的收益；
      * 第七种是"合并 + 精排"，量化两者叠加；
      * 第八、九种是"只展开邻居、不改排序"——排序仍用单块（精确），
-     * 但交给大模型/前端的内容是展开后的（完整），这是最贴近工程实践的做法。
+     * 但交给大模型/前端的内容是展开后的（完整），这是最贴近工程实践的做法；
+     * 第十、十一种是查询改写；第十二、十三种是"原句 + 改写句"双查询融合。
      */
     public static final List<Variant> EVAL_VARIANTS = List.of(
-            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false, false, false, false),
-            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false, false, false, false),
-            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false, false, false, false),
-            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false, false, false, false),
-            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, false, false, true, false),
-            new Variant("hybrid_merge", "混合 + 合并相邻块", SearchMode.HYBRID, true, true, false, false, false),
-            new Variant("hybrid_merge_rerank", "合并相邻块 + 精排", SearchMode.HYBRID, true, true, false, true, false),
-            new Variant("hybrid_expand", "混合 + 展开邻居", SearchMode.HYBRID, true, false, true, false, false),
-            new Variant("hybrid_rerank_expand", "精排 + 展开邻居", SearchMode.HYBRID, true, false, true, true, false),
-            // 新增两路：查询改写（把口语问句翻译成书面语后再做 BM25，向量路仍用原句）
-            new Variant("hybrid_rewrite", "混合 + 查询改写", SearchMode.HYBRID, true, false, false, false, true),
-            new Variant("rewrite_rerank_expand", "改写 + 精排 + 展开", SearchMode.HYBRID, true, false, true, true, true)
+            new Variant("vector", "纯向量", SearchMode.VECTOR, true, false, false, false, false, false),
+            new Variant("bm25", "纯 BM25", SearchMode.BM25, true, false, false, false, false, false),
+            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true, false, false, false, false, false),
+            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false, false, false, false, false, false),
+            new Variant("hybrid_rerank", "混合 + 精排", SearchMode.HYBRID, true, false, false, true, false, false),
+            new Variant("hybrid_merge", "混合 + 合并相邻块", SearchMode.HYBRID, true, true, false, false, false, false),
+            new Variant("hybrid_merge_rerank", "合并相邻块 + 精排", SearchMode.HYBRID, true, true, false, true, false, false),
+            new Variant("hybrid_expand", "混合 + 展开邻居", SearchMode.HYBRID, true, false, true, false, false, false),
+            new Variant("hybrid_rerank_expand", "精排 + 展开邻居", SearchMode.HYBRID, true, false, true, true, false, false),
+            // 查询改写（把口语问句翻译成书面语后再做 BM25，向量路仍用原句）
+            new Variant("hybrid_rewrite", "混合 + 查询改写", SearchMode.HYBRID, true, false, false, false, true, false),
+            new Variant("rewrite_rerank_expand", "改写 + 精排 + 展开", SearchMode.HYBRID, true, false, true, true, true, false),
+            // 双查询融合：原句与改写句各排一次 BM25，再 RRF 合并
+            new Variant("hybrid_rewrite_fusion", "混合 + 双查询融合", SearchMode.HYBRID, true, false, false, false, false, true),
+            new Variant("rewrite_fusion_rerank_expand", "双查询融合 + 精排 + 展开", SearchMode.HYBRID, true, false, true, true, false, true)
     );
 
     /**
@@ -284,18 +297,20 @@ public class RetrievalService {
      */
     public Map<String, List<Hit>> searchAllVariants(String question, int topK) {
         Prepared prepared = prepare(question);
-        // 改写只调一次（内部带缓存），九种配置共用
+        // 改写只调一次（内部带缓存），所有配置共用
         Prepared rewrittenPrepared = prepared;
+        Prepared fusedPrepared = prepared;
         if (queryRewriter.enabled()) {
             String rewritten = queryRewriter.rewrite(question);
             if (rewritten != null) {
                 rewrittenPrepared = withRewrittenBm25(prepared, rewritten);
+                fusedPrepared = withRewrittenBm25Fusion(prepared, rewritten);
             }
         }
         Map<String, List<Hit>> out = new LinkedHashMap<>();
         for (Variant v : EVAL_VARIANTS) {
-            // rewrite 那两路用"改写后的 BM25 分"，其余用原句的
-            Prepared p = v.rewrite() ? rewrittenPrepared : prepared;
+            // 三种预处理结果按配置挑一个：融合 > 纯改写 > 原句
+            Prepared p = v.rewriteFusion() ? fusedPrepared : (v.rewrite() ? rewrittenPrepared : prepared);
             List<Hit> hits;
             if (v.merge()) {
                 hits = mergedHits(p, topK, v.dedupe(), v.rerank());
@@ -566,8 +581,9 @@ public class RetrievalService {
             String rw = queryRewriter.rewrite(question);
             if (rw != null) {
                 rewrittenText = rw;
-                p = withRewrittenBm25(p, rw);
-                log.debug("查询改写：{} → {}", question, rw);
+                // 线上用"双查询融合"而不是"只换改写句"：改写跑偏时不至于把对的题弄坏
+                p = withRewrittenBm25Fusion(p, rw);
+                log.debug("查询改写 + 双查询融合：{} → {}", question, rw);
             }
         }
 
@@ -604,6 +620,34 @@ public class RetrievalService {
     private Prepared withRewrittenBm25(Prepared p, String rewritten) {
         return new Prepared(p.question(), p.chunks(), p.vectorScores(),
                 p.index().scores(rewritten), p.prepareMs(), p.index());
+    }
+
+    /**
+     * 双查询融合：原句 BM25 排一次、改写句 BM25 排一次，两路名次做 RRF。
+     *
+     * <p>为什么要有这一步：只把 BM25 换成改写句，等于"押注改写是对的"。
+     * 一旦改写跑偏（典型题 #54），原本能命中的块会被挤出去。
+     * 融合是"两个问句都算数"，用名次投票，单边跑偏不至于翻车。
+     *
+     * <p>融合发生在 BM25 这一路内部（向量路仍用原句），
+     * 所以后面的"混合 RRF → 精排"流程完全不用改。
+     */
+    private Prepared withRewrittenBm25Fusion(Prepared p, String rewritten) {
+        double[] original = p.index().scores(p.question());
+        double[] rewrittenScores = p.index().scores(rewritten);
+        int[] rOriginal = ranksOf(original);
+        int[] rRewritten = ranksOf(rewrittenScores);
+        // 原句与改写句各占一部分权重：默认各 50%（fusion-w-rewritten 可调）。
+        // 注意别复用 hybrid-w-vector（0.2）：那会让融合几乎等于"只用原句"，等于白做。
+        double wRewritten = fusionWRewritten;
+        double wOriginal = 1.0 - wRewritten;
+        double[] fused = new double[original.length];
+        for (int i = 0; i < fused.length; i++) {
+            fused[i] = wOriginal / (RRF_K + rOriginal[i] + 1)
+                    + wRewritten / (RRF_K + rRewritten[i] + 1);
+        }
+        return new Prepared(p.question(), p.chunks(), p.vectorScores(),
+                fused, p.prepareMs(), p.index());
     }
 
     private record Run(List<Hit> hits, long elapsedMs) {

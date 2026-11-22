@@ -114,6 +114,17 @@ public class SearchController {
     }
 
     /**
+     * 看改写器的调用统计：GET /api/search/rewrite-stats
+     *
+     * <p>评测一轮要 3~4 分钟，中途若有改写失败（限流/超时），数字会悄悄退化成"没改写"。
+     * 先看这里的 attempts / successes / failures，才能区分"方法无效"和"这次没跑成"。
+     */
+    @GetMapping("/search/rewrite-stats")
+    public Map<String, Object> rewriteStats() {
+        return queryRewriter.stats();
+    }
+
+    /**
      * 看这一次查询会用什么融合权重：GET /api/search/weights?q=xxx
      *
      * <p>标定自适应权重的门槛值就靠这个接口：把 dev 集所有题跑一遍，

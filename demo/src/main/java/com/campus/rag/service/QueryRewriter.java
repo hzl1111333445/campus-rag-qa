@@ -3,9 +3,11 @@ package com.campus.rag.service;
 import com.campus.rag.config.LlmProperties;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -65,6 +67,10 @@ public class QueryRewriter {
     private final boolean enabled;
     private final int cacheSize;
     private final ConcurrentHashMap<String, String> cache = new ConcurrentHashMap<>();
+    private final AtomicInteger attempts = new AtomicInteger();
+    private final AtomicInteger successes = new AtomicInteger();
+    private final AtomicInteger failures = new AtomicInteger();
+    private final AtomicInteger cacheHits = new AtomicInteger();
 
     public QueryRewriter(LlmProperties properties,
                          @Value("${campus.rewrite.enabled:false}") boolean enabled,
@@ -110,16 +116,40 @@ public class QueryRewriter {
         }
         String cached = cache.get(question);
         if (cached != null) {
+            cacheHits.incrementAndGet();
             return cached;
         }
+        attempts.incrementAndGet();
         String rewritten = callModel(question);
         if (rewritten != null) {
+            successes.incrementAndGet();
             if (cache.size() >= cacheSize) {
                 cache.clear();
             }
             cache.put(question, rewritten);
+        } else {
+            failures.incrementAndGet();
         }
         return rewritten;
+    }
+
+    /**
+     * 改写器运行统计。
+     *
+     * <p>为什么需要它：评测跑一轮要 3~4 分钟，如果中途有几次改写调用失败（限流、超时），
+     * 结果会悄悄退化成"没改写"，数字看起来像"改动没效果"。
+     * 把这三项数字暴露出来，才能区分"方法无效"和"这次没跑成"。
+     */
+    public Map<String, Object> stats() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("enabled", enabled);
+        m.put("model", properties.getModel());
+        m.put("attempts", attempts.get());
+        m.put("successes", successes.get());
+        m.put("failures", failures.get());
+        m.put("cacheHits", cacheHits.get());
+        m.put("cacheSize", cache.size());
+        return m;
     }
 
     private String callModel(String question) {

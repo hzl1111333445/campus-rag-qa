@@ -75,17 +75,40 @@ public class OpenAiEmbeddingClient implements EmbeddingClient {
         body.put("model", props.getModel());
         body.put("input", texts);
 
-        EmbeddingResponse resp;
-        try {
-            resp = http.post()
-                    .uri("/embeddings")
-                    .body(body)
-                    .retrieve()
-                    .body(EmbeddingResponse.class);
-        } catch (RestClientResponseException e) {
-            // 把服务端返回的原始报错带出来，否则你只会看到一句没用的 400
-            String detail = e.getResponseBodyAsString();
-            throw new IllegalStateException("调用向量化接口失败：" + e.getStatusCode() + " " + explain(detail));
+        // 评测时会在几十秒内发几百次请求，硅基流动会限流（400 / code 20015）。
+        // 这不是我们代码错，退避重试就好；连续 3 次都失败才真正抛出。
+        EmbeddingResponse resp = null;
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                resp = http.post()
+                        .uri("/embeddings")
+                        .body(body)
+                        .retrieve()
+                        .body(EmbeddingResponse.class);
+                last = null;
+                break;
+            } catch (RestClientResponseException e) {
+                // 把服务端返回的原始报错带出来，否则你只会看到一句没用的 400
+                String detail = e.getResponseBodyAsString();
+                last = new IllegalStateException("调用向量化接口失败：" + e.getStatusCode() + " " + explain(detail));
+                boolean retryable = e.getStatusCode().value() == 400 && detail.contains("20015")
+                        || e.getStatusCode().value() == 429
+                        || e.getStatusCode().is5xxServerError();
+                if (!retryable || attempt == 3) {
+                    throw last;
+                }
+                log.warn("向量化接口限流/失败（第 {} 次），{}ms 后重试：{}", attempt, 400L * attempt, explain(detail));
+                try {
+                    Thread.sleep(400L * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw last;
+                }
+            }
+        }
+        if (resp == null && last != null) {
+            throw last;
         }
 
         if (resp == null || resp.data() == null || resp.data().isEmpty()) {
