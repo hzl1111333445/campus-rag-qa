@@ -62,6 +62,9 @@ public class QaService {
      * @param retrievedCount    检索回来几个块
      * @param citationOk        回答里的编号是否全部合法（没有编造）
      * @param invalidCitations  编造的编号（比如资料只有 3 条，它却写了 [5]）
+     * @param grounded          回答里的硬事实是否都能在被引用的原文里找到（接地校验，见 docs/10）
+     * @param factCount         一共抽出几条可核对的硬事实（0 表示这段回答里没有数字/时间/处分名，无从核对）
+     * @param missingFacts      在原文里找不到的事实（"0.20元"这种被改错的数字会出现在这里）
      * @param topScore          最高检索分（精排分或混合分，看有没有开精排）
      * @param gated             是否因为检索分太低而"在检索层就拒答"（这种情况没花大模型的钱）
      */
@@ -72,6 +75,9 @@ public class QaService {
                            int retrievedCount,
                            boolean citationOk,
                            List<Integer> invalidCitations,
+                           boolean grounded,
+                           int factCount,
+                           List<String> missingFacts,
                            double topScore,
                            boolean gated,
                            long elapsedMs) {
@@ -94,7 +100,8 @@ public class QaService {
         if (hits.isEmpty()) {
             return new QaAnswer(question,
                     "本知识库暂未收录与该问题相关的规定，建议咨询学校相关职能部门或查看学校官网。",
-                    chatClient.model(), List.of(), 0, true, List.of(), 0.0, true,
+                    chatClient.model(), List.of(), 0, true, List.of(),
+                    true, 0, List.of(), 0.0, true,
                     System.currentTimeMillis() - begin);
         }
 
@@ -106,7 +113,8 @@ public class QaService {
                             + best.topScore() + "，低于阈值 " + best.threshold() + "）。\n\n"
                             + "你可以换一种问法重试，也可以直接咨询学校相关职能部门。",
                     chatClient.model(), List.of(), hits.size(), true, List.of(),
-                    best.topScore(), true, System.currentTimeMillis() - begin);
+                    true, 0, List.of(), best.topScore(), true,
+                    System.currentTimeMillis() - begin);
         }
 
         // ---------- 第 2 步：拼提示词 ----------
@@ -136,7 +144,23 @@ public class QaService {
             log.warn("模型编造了不存在的引用编号 {}，资料只有 {} 条", invalid, hits.size());
         }
 
-        // ---------- 第 5 步：组装引用列表 ----------
+        // ---------- 第 5 步：接地校验（groundedness）----------
+        // 编号校验只能保证"第 n 条引用存在"，不能保证"这个事实真的来自第 n 条引用"。
+        // 真实案例：问"违纪处分有哪几种"，模型把五种处分答对了，却标到 [2]，
+        // 而那份清单其实在第 3 块里（被切分劈到了下一块）。编号合法，但出处是假的。
+        // 做法：从回答里抽"硬事实"（数字+单位、时间点、处分名称），逐个到被引用块的原文里找。
+        List<String> citedContents = new ArrayList<>();
+        for (int n : cited) {
+            citedContents.add(hits.get(n - 1).content());
+        }
+        AnswerGuard.Check guard = AnswerGuard.check(answer, citedContents);
+        // factCount==0 表示这段回答里没有可核对的硬事实，此时不判"不合格"，只如实上报"核了 0 条"
+        boolean grounded = guard.missing().isEmpty();
+        if (!guard.missing().isEmpty()) {
+            log.warn("回答里有 {} 处事实在被引用原文中找不到：{}", guard.missingCount(), guard.missing());
+        }
+
+        // ---------- 第 6 步：组装引用列表 ----------
         // 只返回"回答里真的用到了"的引用，没用到的就不显示，避免噪音
         List<Reference> references = new ArrayList<>();
         for (int n : cited) {
@@ -146,7 +170,8 @@ public class QaService {
         }
 
         return new QaAnswer(question, answer, chatClient.model(), references, hits.size(),
-                citationOk, invalid, best.topScore(), false, System.currentTimeMillis() - begin);
+                citationOk, invalid, grounded, guard.factCount(), guard.missing(),
+                best.topScore(), false, System.currentTimeMillis() - begin);
     }
 
     /** 调试用：只看检索 + 拼出来的提示词，不调模型（不花钱）。 */
