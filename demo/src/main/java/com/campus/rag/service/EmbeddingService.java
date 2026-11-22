@@ -44,9 +44,22 @@ public class EmbeddingService {
      * @param maxChunks 本次最多处理多少块（调试时先跑 10 块看看，省时间）
      */
     public Map<String, Object> embedPending(int maxChunks) {
-        long begin = System.currentTimeMillis();
+        return embed(documentDao.listChunksNeedingEmbedding(maxChunks));
+    }
 
-        List<DocumentDao.ChunkForEmbed> pending = documentDao.listChunksNeedingEmbedding(maxChunks);
+    /**
+     * 只补某一份文档的向量。
+     *
+     * <p>上传或重新切分完立刻调：新块的 embedding 是 NULL，向量检索看不见它们，
+     * 只有 BM25 能命中 —— 表现就是"文档传上去了，问它却搜不到"。
+     */
+    public Map<String, Object> embedPendingOfDocument(long documentId, int maxChunks) {
+        return embed(documentDao.listChunksNeedingEmbeddingByDocument(documentId, maxChunks));
+    }
+
+    /** 真正的向量化循环：拿一批待处理块，分批调接口，逐块写回。 */
+    private Map<String, Object> embed(List<DocumentDao.ChunkForEmbed> pending) {
+        long begin = System.currentTimeMillis();
         int embedded = 0;
         int batches = 0;
         String error = null;

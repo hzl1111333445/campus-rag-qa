@@ -110,7 +110,10 @@ async function doUpload(option) {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
     if (data.status === 2) {
-      ElMessage.success(`上传成功：切出 ${data.chunkCount} 块，耗时 ${data.elapsedMs} ms`)
+      ElMessage.success(
+        `上传成功：切出 ${data.chunkCount} 块、向量化 ${data.embeddedThisRun} 块，耗时 ${data.elapsedMs} ms`
+      )
+      if (data.embedError) ElMessage.warning(`有块向量化失败：${data.embedError}，可点「补向量化」重试`)
     } else {
       ElMessage.warning(`上传了但切分失败（${data.failReason}），这份文件检索不到内容`)
     }
@@ -135,6 +138,22 @@ async function openChunks(row) {
   }
 }
 
+/**
+ * 补向量化：只处理 embedding 为空的块。
+ * 什么时候需要它？换 embedding 模型、或上传过程中接口失败过，会留下"有块没向量"的文档，
+ * 这种文档只有 BM25 能搜到，向量检索看不见。
+ */
+async function embedPending() {
+  const data = await http.post('/dev/embed-all', null, { params: { maxChunks: 1000 } })
+  if (data.embeddedThisRun > 0) {
+    ElMessage.success(`补齐 ${data.embeddedThisRun} 块向量，耗时 ${data.elapsedMs} ms`)
+  } else {
+    ElMessage.info('没有待向量化的块，库里已是最新')
+  }
+  if (data.error) ElMessage.error(`中途失败：${data.error}`)
+  await load()
+}
+
 async function reprocess(row) {
   await ElMessageBox.confirm(
     `用磁盘上的原文件重新切分「${cleanTitle(row.title)}」？块会被整份替换。`,
@@ -143,7 +162,9 @@ async function reprocess(row) {
   )
   const data = await http.post(`/document/${row.id}/reprocess`)
   if (data.status === 2) {
-    ElMessage.success(`重新切分完成：${data.chunkCount} 块，耗时 ${data.elapsedMs} ms`)
+    ElMessage.success(
+      `重新切分完成：${data.chunkCount} 块、向量化 ${data.embeddedThisRun} 块，耗时 ${data.elapsedMs} ms`
+    )
   } else {
     ElMessage.error('重新切分失败，详情见 kb_document.fail_reason')
   }
@@ -192,6 +213,7 @@ onMounted(async () => {
         <el-input v-model="keyword" placeholder="按标题过滤" clearable class="search" />
         <div class="toolbar-right">
           <el-button :loading="loading" @click="load">刷新</el-button>
+          <el-button @click="embedPending">补向量化</el-button>
           <el-upload
             :show-file-list="false"
             :http-request="doUpload"

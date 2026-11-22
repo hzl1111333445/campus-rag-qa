@@ -3,6 +3,7 @@ package com.campus.rag.controller;
 import com.campus.rag.service.DocumentDao;
 import com.campus.rag.service.DocumentIngestService;
 import com.campus.rag.service.DocumentStorage;
+import com.campus.rag.service.EmbeddingService;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -17,13 +18,16 @@ public class DocumentController {
     private final DocumentStorage storage;
     private final DocumentDao documentDao;
     private final DocumentIngestService ingestService;
+    private final EmbeddingService embeddingService;
 
     public DocumentController(DocumentStorage storage,
                               DocumentDao documentDao,
-                              DocumentIngestService ingestService) {
+                              DocumentIngestService ingestService,
+                              EmbeddingService embeddingService) {
         this.storage = storage;
         this.documentDao = documentDao;
         this.ingestService = ingestService;
+        this.embeddingService = embeddingService;
     }
 
     @PostMapping("/upload")
@@ -49,6 +53,12 @@ public class DocumentController {
         int chunkCount = ingestService.ingest(id, bytes, originalName);
         long elapsed = System.currentTimeMillis() - begin;
 
+        // 第四步：立刻给这份文档的块补向量。
+        // 不做这一步的话，新文档只有 BM25 能搜到、向量检索看不见它 —— 用户体感就是"传了但问不出来"。
+        Map<String, Object> embed = chunkCount > 0
+                ? embeddingService.embedPendingOfDocument(id, 500)
+                : Map.of();
+
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("id", id);
         data.put("originalName", originalName);
@@ -57,6 +67,11 @@ public class DocumentController {
         data.put("chunkCount", chunkCount);
         data.put("status", chunkCount > 0 ? 2 : 3);
         data.put("statusText", chunkCount > 0 ? "成功" : "失败");
+        data.put("embeddedThisRun", embed.getOrDefault("embeddedThisRun", 0));
+        data.put("embedMs", embed.getOrDefault("elapsedMs", 0));
+        if (embed.get("error") != null) {
+            data.put("embedError", embed.get("error"));
+        }
         data.put("elapsedMs", elapsed);
 
         if (chunkCount == 0) {
@@ -99,11 +114,19 @@ public class DocumentController {
         long begin = System.currentTimeMillis();
         int chunkCount = ingestService.reingest(id);
 
+        Map<String, Object> embed = chunkCount > 0
+                ? embeddingService.embedPendingOfDocument(id, 500)
+                : Map.of();
+
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("id", id);
         data.put("chunkCount", chunkCount);
         data.put("status", chunkCount > 0 ? 2 : 3);
+        data.put("embeddedThisRun", embed.getOrDefault("embeddedThisRun", 0));
         data.put("elapsedMs", System.currentTimeMillis() - begin);
+        if (embed.get("error") != null) {
+            data.put("embedError", embed.get("error"));
+        }
         return data;
     }
 

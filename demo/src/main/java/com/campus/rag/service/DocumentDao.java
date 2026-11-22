@@ -133,6 +133,19 @@ public class DocumentDao {
                 limit);
     }
 
+    /**
+     * 只取"某一份文档"里还没算向量的块 —— 上传完立刻补向量用。
+     *
+     * <p>为什么不直接调 listChunksNeedingEmbedding：那是全库扫，
+     * 上传一份文档却可能顺带处理别人遗留的几百块，接口慢得莫名其妙。
+     */
+    public List<ChunkForEmbed> listChunksNeedingEmbeddingByDocument(long documentId, int limit) {
+        return jdbc.query(
+                "SELECT id, content FROM kb_chunk WHERE document_id = ? AND embedding IS NULL ORDER BY id LIMIT ?",
+                (rs, rowNum) -> new ChunkForEmbed(rs.getLong("id"), rs.getString("content")),
+                documentId, limit);
+    }
+
     /** 把算好的向量写回块里，同时记下是哪个模型、多少维。 */
     public void updateChunkEmbedding(long chunkId, String embeddingJson, String model, int dim) {
         jdbc.update("UPDATE kb_chunk SET embedding = ?, embedding_model = ?, embedding_dim = ? WHERE id = ?",
