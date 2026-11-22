@@ -132,7 +132,51 @@ public class RetrievalService {
      * @param mode     用哪种检索方式
      */
     public List<Hit> search(String question, int topK, SearchMode mode) {
-        return run(question, topK, mode).hits();
+        return search(question, topK, mode, true);
+    }
+
+    /**
+     * 检索主方法（可关掉相邻块去重）。
+     *
+     * <p>为什么要把"去重"做成开关？因为评测时要回答"去重到底有没有用"。
+     * 写死的逻辑没法对比，只能拍脑袋说"我觉得有用"。
+     *
+     * @param dedupe true = 跳过同文档相邻块（生产默认）；false = 原样返回
+     */
+    public List<Hit> search(String question, int topK, SearchMode mode, boolean dedupe) {
+        return run(question, topK, mode, dedupe).hits();
+    }
+
+    /** 评测里的一种"检索配置"= 检索方式 + 是否去重 */
+    public record Variant(String code, String label, SearchMode mode, boolean dedupe) {
+    }
+
+    /**
+     * 评测用的四种配置。
+     *
+     * <p>前三列是三种检索方式（都开去重，等于线上行为）；
+     * 第四列是"混合 + 不去重"，专门用来量化去重的收益。
+     */
+    public static final List<Variant> EVAL_VARIANTS = List.of(
+            new Variant("vector", "纯向量", SearchMode.VECTOR, true),
+            new Variant("bm25", "纯 BM25", SearchMode.BM25, true),
+            new Variant("hybrid", "混合 RRF", SearchMode.HYBRID, true),
+            new Variant("hybrid_no_dedupe", "混合 RRF（不去重）", SearchMode.HYBRID, false)
+    );
+
+    /**
+     * 一次预处理，跑完所有评测配置。
+     *
+     * <p>36 题 × 4 种配置如果每题每种各调一次接口，就要向量化 144 次；
+     * 这里每题只向量化 1 次、读库 1 次，然后复用分数算 4 种排序。
+     */
+    public Map<String, List<Hit>> searchAllVariants(String question, int topK) {
+        Prepared p = prepare(question);
+        Map<String, List<Hit>> out = new LinkedHashMap<>();
+        for (Variant v : EVAL_VARIANTS) {
+            out.put(v.code(), buildHits(p, topK, v.mode(), v.dedupe()));
+        }
+        return out;
     }
 
     /**
@@ -234,6 +278,11 @@ public class RetrievalService {
 
     /** 按指定方式把分数变成排好序的 Hit 列表 */
     private List<Hit> buildHits(Prepared p, int topK, SearchMode mode) {
+        return buildHits(p, topK, mode, true);
+    }
+
+    /** 按指定方式 + 是否去重 把分数变成排好序的 Hit 列表 */
+    private List<Hit> buildHits(Prepared p, int topK, SearchMode mode, boolean dedupe) {
         List<DocumentDao.ChunkWithEmbedding> chunks = p.chunks();
         if (chunks.isEmpty()) {
             return List.of();
@@ -277,12 +326,14 @@ public class RetrievalService {
             DocumentDao.ChunkWithEmbedding c = chunks.get(i);
 
             boolean isDuplicate = false;
-            for (Hit kept : hits) {
-                boolean sameDoc = kept.documentTitle().equals(c.documentTitle());
-                boolean adjacent = Math.abs(kept.chunkIndex() - c.chunkIndex()) <= 1;
-                if (sameDoc && adjacent) {
-                    isDuplicate = true;
-                    break;
+            if (dedupe) {
+                for (Hit kept : hits) {
+                    boolean sameDoc = kept.documentTitle().equals(c.documentTitle());
+                    boolean adjacent = Math.abs(kept.chunkIndex() - c.chunkIndex()) <= 1;
+                    if (sameDoc && adjacent) {
+                        isDuplicate = true;
+                        break;
+                    }
                 }
             }
             if (isDuplicate) {
@@ -341,13 +392,13 @@ public class RetrievalService {
         return ranks;
     }
 
-    private Run run(String question, int topK, SearchMode mode) {
+    private Run run(String question, int topK, SearchMode mode, boolean dedupe) {
         long begin = System.currentTimeMillis();
         Prepared p = prepare(question);
-        List<Hit> hits = buildHits(p, topK, mode);
+        List<Hit> hits = buildHits(p, topK, mode, dedupe);
         long elapsed = System.currentTimeMillis() - begin;
-        log.debug("检索完成：问题「{}」，方式 {}，候选 {} 块，返回 {} 块，耗时 {}ms",
-                question, mode.code(), p.chunks().size(), hits.size(), elapsed);
+        log.debug("检索完成：问题「{}」，方式 {}，去重 {}，候选 {} 块，返回 {} 块，耗时 {}ms",
+                question, mode.code(), dedupe, p.chunks().size(), hits.size(), elapsed);
         return new Run(hits, elapsed);
     }
 
