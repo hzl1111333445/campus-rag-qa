@@ -1,6 +1,7 @@
 package com.campus.rag.config;
 
 import com.campus.rag.service.AuthException;
+import com.campus.rag.service.ForbiddenException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -29,6 +30,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AuthException.class)
     public ResponseEntity<Map<String, Object>> handleAuth(AuthException e) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(body(401, e.getMessage()));
+    }
+
+    /** 越权访问 → 403（按 id 访问别人的会话时，Controller 会先转成 404 语义，不透出存在性） */
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<Map<String, Object>> handleForbidden(ForbiddenException e) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body(403, e.getMessage()));
     }
 
     /** 参数不合法（文档不存在、问题为空等）→ 400 */

@@ -30,12 +30,16 @@ CREATE TABLE IF NOT EXISTS kb_document (
 -- 没有会话概念的话前端一刷新就全没了，也做不了"历史上的问题"和后续的多轮理解。
 CREATE TABLE IF NOT EXISTS qa_session (
     id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id     BIGINT UNSIGNED NULL                    COMMENT '归属用户；NULL 表示匿名（评测脚本/未登录）',
     title       VARCHAR(100)    NOT NULL                COMMENT '会话标题，默认取首问前 20 字',
     create_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后一次提问时间，列表按它倒序',
     PRIMARY KEY (id),
-    KEY idx_update_time (update_time)
+    KEY idx_update_time (update_time),
+    KEY idx_user_update (user_id, update_time)       -- 学生列表页按"我的会话+最近更新"查，走这个索引
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '问答会话';
+-- 注意：老库（已有 qa_session 表）不会因为上面这段而加列，必须手工跑
+-- resources/db/migration-2026-11-23-session-user.sql
 
 -- 消息表：一轮问答 = 两行（user 一行、assistant 一行）。
 -- 除了文本，还把当次的"诚实性信号"和引用快照一起存下来：

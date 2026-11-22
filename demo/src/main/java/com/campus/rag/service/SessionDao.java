@@ -28,8 +28,12 @@ public class SessionDao {
 
     // ==================== 会话 ====================
 
-    /** 新建会话，返回自增 id。title 为空时给个默认名。 */
-    public long create(String title) {
+    /**
+     * 新建会话，返回自增 id。title 为空时给个默认名。
+     *
+     * @param userId 归属用户；null 表示匿名（评测脚本不带令牌）
+     */
+    public long create(String title, Long userId) {
         String t = (title == null || title.isBlank()) ? "新的对话" : title.trim();
         if (t.length() > 100) {
             t = t.substring(0, 100);
@@ -39,28 +43,45 @@ public class SessionDao {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO qa_session(title) VALUES (?)", new String[]{"id"});
+                    "INSERT INTO qa_session(title, user_id) VALUES (?, ?)", new String[]{"id"});
             ps.setString(1, finalTitle);
+            if (userId == null) {
+                ps.setNull(2, Types.BIGINT);
+            } else {
+                ps.setLong(2, userId);
+            }
             return ps;
         }, keyHolder);
         return keyHolder.getKey().longValue();
     }
 
-    /** 会话列表，最近提问的在前。带每条会话的消息数（前端要显示"N 条"）。 */
-    public List<Map<String, Object>> list(int limit) {
-        String sql = """
-                SELECT s.id, s.title, s.create_time, s.update_time,
+    /**
+     * 会话列表，最近提问的在前。带每条会话的消息数（前端要显示"N 条"）。
+     *
+     * <p>过滤放在 SQL 里而不是查完再筛：数据隔离应该由数据库层保证，
+     * 查全表再在 Java 里过滤，只要有人忘了过滤就是全量泄露。
+     *
+     * @param userId 请求者 id；null 表示管理员视角（看全部，含匿名会话）
+     */
+    public List<Map<String, Object>> list(int limit, Long userId) {
+        String base = """
+                SELECT s.id, s.user_id, s.title, s.create_time, s.update_time,
                        (SELECT COUNT(*) FROM qa_message m WHERE m.session_id = s.id) AS message_count
                 FROM qa_session s
+                %s
                 ORDER BY s.update_time DESC, s.id DESC
                 LIMIT ?
                 """;
-        return jdbc.queryForList(sql, limit);
+        if (userId == null) {
+            // 管理员：不过滤。user_id 为 NULL 的匿名会话也一并返回（排查评测用）
+            return jdbc.queryForList(String.format(base, ""), limit);
+        }
+        return jdbc.queryForList(String.format(base, "WHERE s.user_id = ?"), userId, limit);
     }
 
     public Map<String, Object> findById(long id) {
         List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id, title, create_time, update_time FROM qa_session WHERE id = ?", id);
+                "SELECT id, user_id, title, create_time, update_time FROM qa_session WHERE id = ?", id);
         return rows.isEmpty() ? null : rows.get(0);
     }
 

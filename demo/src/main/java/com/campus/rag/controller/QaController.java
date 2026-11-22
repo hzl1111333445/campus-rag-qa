@@ -1,7 +1,10 @@
 package com.campus.rag.controller;
 
+import com.campus.rag.config.AuthInterceptor;
+import com.campus.rag.service.AuthService;
 import com.campus.rag.service.QaService;
 import com.campus.rag.service.ContextAssembler;
+import com.campus.rag.service.SessionAccess;
 import com.campus.rag.service.SessionDao;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,6 +16,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -26,6 +30,10 @@ import java.util.Map;
  *   <li>POST /api/qa        —— 真回答（会调大模型，花钱、慢）</li>
  *   <li>GET  /api/qa/preview —— 只看检索到了什么、提示词长什么样（不花钱，调试用）</li>
  * </ul>
+ *
+ * <p>2026-11-23 起：带令牌提问会记到该用户名下，不带令牌则记为<b>匿名会话</b>
+ * （$user_id$ 为 NULL，只有管理员能看见）——评测脚本 tools/eval-answer.py 因此不用改。
+ * 若请求里带了别人的 sessionId，直接按"会话不存在"拒绝，避免往别人的会话里追加消息。
  *
  * <p>2026-11-22 起，POST /api/qa 会顺手把这一问一答存进会话表：
  * <ul>
@@ -58,15 +66,19 @@ public class QaController {
     }
 
     @PostMapping
-    public ResponseEntity<QaService.QaAnswer> ask(@RequestBody AskRequest req) {
+    public ResponseEntity<QaService.QaAnswer> ask(
+            @RequestBody AskRequest req,
+            @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
+            @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role) {
         if (req == null || req.question() == null || req.question().isBlank()) {
             throw new IllegalArgumentException("question 不能为空");
         }
         String question = req.question().trim();
         int topK = req.topK() == null ? 3 : Math.max(1, req.topK());
 
-        // 先定会话：没给或给的 id 不存在，就新建一个，标题取问题前 20 字
-        long sessionId = resolveSession(req.sessionId(), question);
+        // 先定会话：没给就新建；给了就必须是"自己的"（管理员例外），否则按不存在拒绝
+        long sessionId = resolveSession(req.sessionId(), question, userId,
+                AuthService.ROLE_ADMIN.equals(role));
 
         // 取历史必须放在"本次提问入库"之前，取到的才是之前几轮而不是含自己
         List<ContextAssembler.Turn> history = contextAssembler.load(sessionDao, sessionId);
@@ -106,12 +118,32 @@ public class QaController {
         return qaService.preview(q, Math.max(1, topK), history);
     }
 
-    private long resolveSession(Long sessionId, String question) {
-        if (sessionId != null && sessionDao.findById(sessionId) != null) {
-            return sessionId;
+    /**
+     * 决定这次问答落在哪个会话里。
+     *
+     * <p>三种情况：
+     * <ol>
+     *   <li>没给 sessionId → 新建一个，归属人 = 当前登录人（未登录为 null 匿名）；</li>
+     *   <li>给了且是自己的/管理员 → 追加到这个会话；</li>
+     *   <li>给了别人的 → 按"不存在"拒绝（不静默新建，否则会悄悄吞掉一条记录）。</li>
+     * </ol>
+     */
+    private long resolveSession(Long sessionId, String question, Long userId, boolean admin) {
+        if (sessionId != null) {
+            Map<String, Object> session = sessionDao.findById(sessionId);
+            if (session != null) {
+                Long owner = session.get("user_id") == null
+                        ? null
+                        : ((Number) session.get("user_id")).longValue();
+                if (!SessionAccess.can(owner, userId, admin)) {
+                    throw new IllegalArgumentException("会话不存在：" + sessionId);
+                }
+                return sessionId;
+            }
+            // 存在性检查通过但记录不存在：当作"没给"，新建（前端可能拿着被删的旧 id）
         }
         String title = question.length() > 20 ? question.substring(0, 20) + "…" : question;
-        return sessionDao.create(title);
+        return sessionDao.create(title, SessionAccess.ownerFor(userId));
     }
 
     private String toJson(List<QaService.Reference> refs) {
