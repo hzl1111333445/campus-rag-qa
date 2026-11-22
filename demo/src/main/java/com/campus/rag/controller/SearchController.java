@@ -109,4 +109,22 @@ public class SearchController {
     public Map<String, Object> stats() {
         return retrievalService.bm25Stats();
     }
+
+    /**
+     * 看这一次查询会用什么融合权重：GET /api/search/weights?q=xxx
+     *
+     * <p>标定自适应权重的门槛值就靠这个接口：把 dev 集所有题跑一遍，
+     * 看 signal 的分布，再决定 bm25-strong-avg 取多少。
+     */
+    @GetMapping("/search/weights")
+    public Map<String, Object> weights(@RequestParam("q") String q) {
+        RetrievalService.WeightDecision d = retrievalService.explainWeights(q);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("question", q);
+        data.put("wVector", d.wVector());
+        data.put("wBm25", d.wBm25());
+        data.put("signal", Math.round(d.signal() * 100) / 100.0);
+        data.put("reason", d.reason());
+        return data;
+    }
 }

@@ -70,6 +70,22 @@ public class RetrievalService {
     private final double minScoreRerank;
     private final double minScoreHybrid;
 
+    /**
+     * 自适应融合开关。
+     *
+     * <p>固定权重 0.2 / 0.8 是在"题面和原文共用汉字"的题上调出来的。
+     * 遇到硬改写题（"借的书忘还了怎么算"），BM25 几乎打不出分，
+     * 它那 0.8 的权重就成了噪声，反而把向量排对的结果挤下去
+     * （实测硬改写题：纯向量 60%、纯 BM25 20%、固定权重混合只有 40%）。
+     */
+    private final boolean adaptiveWeights;
+
+    /** 判"BM25 到底有没有信号"的门槛：BM25 最高分 ÷ 查询词数 */
+    private final double bm25StrongAvg;
+
+    /** BM25 信号弱时，向量权重上调到多少 */
+    private final double weakWVector;
+
     /** BM25 索引缓存：它的构建要遍历所有块，不能每次查询都重建 */
     private volatile Bm25Index bm25Cache;
     private volatile String bm25CacheKey;
@@ -82,7 +98,10 @@ public class RetrievalService {
                             @Value("${campus.retrieval.hybrid-w-vector:0.2}") double hybridWeightVector,
                             @Value("${campus.retrieval.mode:hybrid}") String defaultMode,
                             @Value("${campus.retrieval.min-score-rerank:0.0}") double minScoreRerank,
-                            @Value("${campus.retrieval.min-score-hybrid:0.0}") double minScoreHybrid) {
+                            @Value("${campus.retrieval.min-score-hybrid:0.0}") double minScoreHybrid,
+                            @Value("${campus.retrieval.adaptive:false}") boolean adaptiveWeights,
+                            @Value("${campus.retrieval.bm25-strong-avg:1.5}") double bm25StrongAvg,
+                            @Value("${campus.retrieval.weak-w-vector:0.7}") double weakWVector) {
         this.embeddingClient = embeddingClient;
         this.documentDao = documentDao;
         this.embeddingService = embeddingService;
@@ -92,6 +111,52 @@ public class RetrievalService {
         this.defaultMode = SearchMode.from(defaultMode);
         this.minScoreRerank = minScoreRerank;
         this.minScoreHybrid = minScoreHybrid;
+        this.adaptiveWeights = adaptiveWeights;
+        this.bm25StrongAvg = bm25StrongAvg;
+        this.weakWVector = weakWVector;
+    }
+
+    /**
+     * 这一次查询用的融合权重。
+     *
+     * @param wVector 向量那一路的权重
+     * @param wBm25   BM25 那一路的权重（= 1 - wVector）
+     * @param signal  "BM25 强度" = BM25 最高分 ÷ 查询词数，越大说明字面越对得上
+     * @param reason  人话解释，打日志/调试用
+     */
+    public record WeightDecision(double wVector, double wBm25, double signal, String reason) {
+    }
+
+    /**
+     * 决定这次查询的融合权重。
+     *
+     * <p>为什么用「BM25 最高分 ÷ 查询词数」当信号？
+     * BM25 是所有查询词得分之和，词多分自然高，直接拿绝对分数卡阈值会让长问题吃亏；
+     * 除以词数就是"平均每个查询词给最高分块贡献了多少分"，才可比。
+     */
+    WeightDecision decideWeights(Prepared p) {
+        int terms = Math.max(1, Tokenizer.tokenize(p.question()).size());
+        double top = 0;
+        for (double s : p.bm25Scores()) {
+            if (s > top) {
+                top = s;
+            }
+        }
+        double signal = top / terms;
+        if (!adaptiveWeights) {
+            return new WeightDecision(hybridWeightVector, 1 - hybridWeightVector, signal, "自适应关闭，用固定权重");
+        }
+        if (signal < bm25StrongAvg) {
+            return new WeightDecision(weakWVector, 1 - weakWVector, signal,
+                    "BM25 信号弱（" + round2(signal) + " < " + bm25StrongAvg + "），向量权重上调");
+        }
+        return new WeightDecision(hybridWeightVector, 1 - hybridWeightVector, signal,
+                "BM25 信号足够（" + round2(signal) + " ≥ " + bm25StrongAvg + "），维持默认权重");
+    }
+
+    /** 对外暴露一次查询的权重决策（调试/标定用） */
+    public WeightDecision explainWeights(String question) {
+        return decideWeights(prepare(question));
     }
 
     /** 检索方式 */
@@ -588,7 +653,10 @@ public class RetrievalService {
         switch (mode) {
             case VECTOR -> scores = p.vectorScores();
             case BM25 -> scores = p.bm25Scores();
-            case HYBRID -> scores = rrf(p.vectorScores(), p.bm25Scores());
+            case HYBRID -> {
+                WeightDecision d = decideWeights(p);
+                scores = rrf(p.vectorScores(), p.bm25Scores(), d.wVector());
+            }
             default -> scores = p.vectorScores();
         }
 
@@ -659,10 +727,15 @@ public class RetrievalService {
      * 余弦最大 1，BM25 可能 30+。直接相加等于"BM25 说了算"。
      */
     private double[] rrf(double[] vectorScores, double[] bm25Scores) {
+        return rrf(vectorScores, bm25Scores, hybridWeightVector);
+    }
+
+    /** RRF 融合（指定向量权重）：自适应模式下权重由 {@link #decideWeights} 算出 */
+    private double[] rrf(double[] vectorScores, double[] bm25Scores, double wVector) {
         int n = vectorScores.length;
         int[] vRank = ranksOf(vectorScores);
         int[] bRank = ranksOf(bm25Scores);
-        double wv = hybridWeightVector;
+        double wv = wVector;
         double wb = 1 - wv;
         double[] fused = new double[n];
         for (int i = 0; i < n; i++) {
@@ -670,6 +743,11 @@ public class RetrievalService {
             fused[i] += wb / (RRF_K + bRank[i] + 1);
         }
         return fused;
+    }
+
+    /** 保留两位小数，只用于日志/调试文案 */
+    private static double round2(double v) {
+        return Math.round(v * 100) / 100.0;
     }
 
     /** 把分数数组转成"名次数组"：ranks[块下标] = 该块排第几（从 0 开始） */
@@ -717,6 +795,9 @@ public class RetrievalService {
         m.put("fingerprint", index == null ? null : index.fingerprint());
         m.put("defaultMode", defaultMode.code());
         m.put("hybridWVector", hybridWeightVector);
+        m.put("adaptive", adaptiveWeights);
+        m.put("bm25StrongAvg", bm25StrongAvg);
+        m.put("weakWVector", weakWVector);
         return m;
     }
 }
