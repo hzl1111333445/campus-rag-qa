@@ -59,12 +59,33 @@ public class QueryRewriter {
             4. 只输出改写后的一句话，不要解释、不要引号、不要编号。
             """;
 
+    /**
+     * 追问补全提示词：把"那要怎么申请？"这类省略句补成能独立检索的问题。
+     *
+     * <p>和上面的"词汇改写"是两件事：
+     * <ul>
+     *   <li>词汇改写：同一句话，换用词（忘还了 → 逾期归还）</li>
+     *   <li>追问补全：把省略的主语/对象补回来（那要怎么申请？ → 国家助学金怎么申请？）</li>
+     * </ul>
+     * 分开写提示词，是因为两种改写的失败模式不同：词汇改写怕改跑意图，
+     * 追问补全怕补错主体（历史在聊助学金，被补成奖学金就灾难了）。
+     */
+    private static final String FOLLOWUP_SYSTEM_PROMPT = """
+            你是校园问答系统的「追问补全器」。用户会在多轮对话里用省略句追问（如"那要怎么申请？"），
+            你要结合对话历史，把它补成一个能独立检索的完整问题。要求：
+            1. 只补全省略的主语、对象、事项；不要改变用户的意图，不要添加用户没问的内容；
+            2. 主体必须来自对话历史里出现过的事物，不许自己猜一个相近的概念；
+            3. 输出一句中文问句，不超过 30 字，不要引号、不要编号、不要解释；
+            4. 如果最新这句话本身已经完整，就原样输出。
+            """;
+
     private static final int MAX_REWRITE_CHARS = 80;
     private static final int MAX_TOKENS = 96;
 
     private final LlmProperties properties;
     private final RestClient restClient;
     private final boolean enabled;
+    private final boolean followUpEnabled;
     private final int cacheSize;
     private final ConcurrentHashMap<String, String> cache = new ConcurrentHashMap<>();
     private final AtomicInteger attempts = new AtomicInteger();
@@ -75,9 +96,11 @@ public class QueryRewriter {
     public QueryRewriter(LlmProperties properties,
                          @Value("${campus.rewrite.enabled:false}") boolean enabled,
                          @Value("${campus.rewrite.timeout-seconds:8}") int timeoutSeconds,
-                         @Value("${campus.rewrite.cache-size:500}") int cacheSize) {
+                         @Value("${campus.rewrite.cache-size:500}") int cacheSize,
+                         @Value("${campus.context.followup-rewrite:true}") boolean followUpEnabled) {
         this.properties = properties;
         this.enabled = enabled;
+        this.followUpEnabled = followUpEnabled;
         this.cacheSize = Math.max(50, cacheSize);
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(5));
@@ -134,6 +157,45 @@ public class QueryRewriter {
     }
 
     /**
+     * 追问补全：用最近几轮对话把省略句补成完整问题（用于检索）。
+     *
+     * <p>为什么单独一个入口而不是复用 {@link #rewrite(String)}：
+     * 缓存键必须带上历史——同一句"那要怎么申请？"在"助学金"和"奖学金"两个上下文里
+     * 应该补成两个不同的问句，只按问题文本做缓存会串味。
+     *
+     * @return 补全后的问句；未启用、无历史、调用失败或补不出来时返回 {@code null}
+     */
+    public String rewriteFollowUp(String question, List<ContextAssembler.Turn> history) {
+        if (!followUpEnabled || question == null || question.isBlank()
+                || history == null || history.isEmpty()) {
+            return null;
+        }
+        StringBuilder ctx = new StringBuilder();
+        for (ContextAssembler.Turn t : history) {
+            ctx.append("assistant".equals(t.role()) ? "助手：" : "用户：").append(t.content()).append('\n');
+        }
+        String key = "fu|" + ctx.toString().hashCode() + "|" + question;
+        String cached = cache.get(key);
+        if (cached != null) {
+            cacheHits.incrementAndGet();
+            return cached;
+        }
+        attempts.incrementAndGet();
+        String user = "【对话历史】\n" + ctx + "\n【最新一句话】\n" + question;
+        String out = callModel(FOLLOWUP_SYSTEM_PROMPT, user, question);
+        if (out != null) {
+            successes.incrementAndGet();
+            if (cache.size() >= cacheSize) {
+                cache.clear();
+            }
+            cache.put(key, out);
+        } else {
+            failures.incrementAndGet();
+        }
+        return out;
+    }
+
+    /**
      * 改写器运行统计。
      *
      * <p>为什么需要它：评测跑一轮要 3~4 分钟，如果中途有几次改写调用失败（限流、超时），
@@ -153,12 +215,16 @@ public class QueryRewriter {
     }
 
     private String callModel(String question) {
+        return callModel(SYSTEM_PROMPT, question, question);
+    }
+
+    private String callModel(String systemPrompt, String userContent, String originalQuestion) {
         try {
             Map<String, Object> body = Map.of(
                     "model", properties.getModel(),
                     "messages", List.of(
-                            Map.of("role", "system", "content", SYSTEM_PROMPT),
-                            Map.of("role", "user", "content", question)),
+                            Map.of("role", "system", "content", systemPrompt),
+                            Map.of("role", "user", "content", userContent)),
                     "temperature", 0.0,
                     "max_tokens", MAX_TOKENS,
                     "stream", false);
@@ -175,7 +241,7 @@ public class QueryRewriter {
                 return null;
             }
             String text = sanitize(response.choices().get(0).message().content());
-            if (text == null || text.equals(question)) {
+            if (text == null || text.equals(originalQuestion)) {
                 return null;
             }
             return text;

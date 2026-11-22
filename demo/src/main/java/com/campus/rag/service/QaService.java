@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -34,17 +35,29 @@ public class QaService {
     private final PromptBuilder promptBuilder;
     private final ChatClient chatClient;
     private final LlmProperties llmProperties;
+    private final QueryRewriter queryRewriter;
     private final ObjectMapper objectMapper;
+
+    /**
+     * 追问补全的触发阈值：按原句检索的最高分低于它，才认为"这句话自己检索不明白"，
+     * 才值得多花一次补全 + 一次检索。正常问题 topScore 在 0.5 以上，
+     * 省略式追问往往掉到 0.1 以下，0.30 留了足够余量。
+     */
+    private final double followupTriggerScore;
 
     public QaService(RetrievalService retrievalService,
                      PromptBuilder promptBuilder,
                      ChatClient chatClient,
                      LlmProperties llmProperties,
+                     QueryRewriter queryRewriter,
+                     @Value("${campus.context.followup-trigger-score:0.30}") double followupTriggerScore,
                      ObjectMapper objectMapper) {
         this.retrievalService = retrievalService;
         this.promptBuilder = promptBuilder;
         this.chatClient = chatClient;
         this.llmProperties = llmProperties;
+        this.queryRewriter = queryRewriter;
+        this.followupTriggerScore = followupTriggerScore;
         this.objectMapper = objectMapper;
     }
 
@@ -90,6 +103,7 @@ public class QaService {
                            double topScore,
                            boolean gated,
                            int evidenceCount,
+                           String standaloneQuestion,
                            long elapsedMs) {
     }
 
@@ -119,8 +133,33 @@ public class QaService {
                     history.size(), ContextAssembler.describe(history));
         }
 
-        // ---------- 第 1 步：检索（混合粗排 → 精排 → 展开邻居，详见 docs/08）----------
-        RetrievalService.Best best = retrievalService.searchBestGated(question, topK);
+        // ---------- 第 0 步：追问补全（多轮专用，只在"这句话自己检索不明白"时才做）----------
+        // 先按原句检索一次：分数高说明这句话自己就够清楚，没必要补（省一次模型调用 + 一次检索）
+        // 分数低 + 有历史 → 才用历史把它补成完整问题，再检索一次
+        String standaloneQuestion = null;
+        RetrievalService.Best best = null;
+        if (history != null && !history.isEmpty() && followupTriggerScore > 0) {
+            best = retrievalService.searchBestGated(question, topK);
+            if (best.topScore() < followupTriggerScore && !best.gated()) {
+                String completed = queryRewriter.rewriteFollowUp(question, history);
+                if (completed != null && !completed.equals(question)) {
+                    RetrievalService.Best second = retrievalService.searchBestGated(completed, topK);
+                    // 只有"补全后确实更好"才采用，否则保留原结果——
+                    // 补全也是模型在猜，猜错了不能把原本对的结果弄坏
+                    if (second.topScore() > best.topScore()) {
+                        log.info("追问补全生效：「{}」+ 历史 → 「{}」，topScore {} → {}",
+                                question, completed, best.topScore(), second.topScore());
+                        standaloneQuestion = completed;
+                        best = second;
+                    } else {
+                        log.info("追问补全没提升，保留原检索：{} → {}（{} vs {}）",
+                                question, completed, second.topScore(), best.topScore());
+                    }
+                }
+            }
+        } else {
+            best = retrievalService.searchBestGated(question, topK);
+        }
         List<RetrievalService.Hit> hits = best.hits();
 
         // 一条都没检索到：连资料都没有，直接拒答（不花钱）
@@ -128,7 +167,7 @@ public class QaService {
             return new QaAnswer(question,
                     "本知识库暂未收录与该问题相关的规定，建议咨询学校相关职能部门或查看学校官网。",
                     chatClient.model(), List.of(), 0, true, List.of(),
-                    true, 0, List.of(), 0.0, true, 0,
+                    true, 0, List.of(), 0.0, true, 0, standaloneQuestion,
                     System.currentTimeMillis() - begin);
         }
 
@@ -140,7 +179,7 @@ public class QaService {
                             + best.topScore() + "，低于阈值 " + best.threshold() + "）。\n\n"
                             + "你可以换一种问法重试，也可以直接咨询学校相关职能部门。",
                     chatClient.model(), List.of(), hits.size(), true, List.of(),
-                    true, 0, List.of(), best.topScore(), true, 0,
+                    true, 0, List.of(), best.topScore(), true, 0, standaloneQuestion,
                     System.currentTimeMillis() - begin);
         }
 
@@ -212,7 +251,8 @@ public class QaService {
 
         return new QaAnswer(question, answer, chatClient.model(), references, hits.size(),
                 citationOk, invalid, grounded, guard.factCount(), guard.missing(),
-                best.topScore(), false, evidenceCount, System.currentTimeMillis() - begin);
+                best.topScore(), false, evidenceCount, standaloneQuestion,
+                System.currentTimeMillis() - begin);
     }
 
     /**
