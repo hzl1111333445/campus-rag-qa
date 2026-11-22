@@ -23,6 +23,12 @@ campus:
   split:
     size: 220                  # 每块目标 220 字（先照课程默认值，后面用实验来定）
     overlap: 50                # 相邻块重叠 50 字
+  # ---------- 检索方式 ----------
+  retrieval:
+    mode: ${RETRIEVAL_MODE:hybrid}      # vector / bm25 / hybrid。hybrid 默认，因为实测比单路好
+    hybrid-w-vector: ${HYBRID_W_VECTOR:0.2}   # 混合时向量那一路的权重，BM25 那一路是 0.8
+    # 为什么向量只给 0.2？实测（414 块、真 bge-m3 向量）纯向量在"列举型"问题上漏块，
+    # 而中文校园规章这种文本，字面重叠度很高，BM25 更稳。这个数是可调的实验参数。
   embedding:
     provider: ${EMBEDDING_PROVIDER:openai}   # openai = 真模型；hash = 离线假向量（还没写）
     model: ${EMBEDDING_MODEL:BAAI/bge-m3}    # 硅基流动上的免费向量模型
