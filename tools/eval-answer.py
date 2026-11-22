@@ -21,8 +21,11 @@ def load():
 
 def ask(q):
     body = json.dumps({"question": q, "topK": 3}).encode("utf-8")
+    # X-No-Persist: 评测是机器调用，不该往 qa_session 里灌 118 条"匿名会话"
+    # 把真人对话历史淹掉；后端看到这个头会跳过会话落库。
     req = urllib.request.Request(BASE + "/api/qa", data=body,
-                                headers={"Content-Type": "application/json"}, method="POST")
+                                headers={"Content-Type": "application/json",
+                                         "X-No-Persist": "1"}, method="POST")
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read().decode("utf-8"))
 

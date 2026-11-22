@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -69,12 +70,25 @@ public class QaController {
     public ResponseEntity<QaService.QaAnswer> ask(
             @RequestBody AskRequest req,
             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
-            @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role) {
+            @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role,
+            @RequestHeader(value = "X-No-Persist", required = false) String noPersist) {
         if (req == null || req.question() == null || req.question().isBlank()) {
             throw new IllegalArgumentException("question 不能为空");
         }
         String question = req.question().trim();
         int topK = req.topK() == null ? 3 : Math.max(1, req.topK());
+
+        // 评测/压测这类机器调用不该产生会话记录：带 X-No-Persist: 1 就整段跳过。
+        // 不跳过的后果是——每跑一次 118 题的评测就往 qa_session 灌 118 条"匿名会话"，
+        // 把真人对话历史淹掉（管理员视角会看到一屏同名会话）。
+        boolean noPersistFlag = noPersist != null
+                && (noPersist.equals("1") || noPersist.equalsIgnoreCase("true"));
+        if (noPersistFlag) {
+            QaService.QaAnswer plain = qaService.ask(question, topK, List.of());
+            return ResponseEntity.ok()
+                    .header("X-Persisted", "none")
+                    .body(plain);
+        }
 
         // 先定会话：没给就新建；给了就必须是"自己的"（管理员例外），否则按不存在拒绝
         long sessionId = resolveSession(req.sessionId(), question, userId,

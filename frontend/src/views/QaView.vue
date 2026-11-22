@@ -3,6 +3,7 @@ import { nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import http, { httpRaw } from '../api/http'
+import { isAdmin } from '../store/auth'
 
 /**
  * 智能问答页（第 2 步·对话式 UI + 会话管理）。
@@ -268,7 +269,11 @@ onMounted(async () => {
           :class="{ active: s.id === sessionId }"
           @click="openSession(s)"
         >
-          <div class="session-title">{{ s.title }}</div>
+          <div class="session-title">
+            <span class="session-name">{{ s.title }}</span>
+            <!-- 匿名会话 = 不带令牌的调用（评测脚本）留下的，只有管理员看得到 -->
+            <el-tag v-if="isAdmin() && s.user_id == null" size="small" type="info" effect="plain">匿名</el-tag>
+          </div>
           <div class="session-meta">{{ s.message_count }} 条 · {{ timeText(s.update_time) }}</div>
           <div class="session-ops">
             <button class="op" @click.stop="renameSession(s)">改名</button>
@@ -470,6 +475,9 @@ onMounted(async () => {
   background: #eaf2ff;
 }
 .session-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   color: #303133;
   overflow: hidden;
@@ -488,6 +496,14 @@ onMounted(async () => {
   top: 6px;
   gap: 4px;
 }
+.session-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-item:hover .session-ops {
   display: flex;
 }
