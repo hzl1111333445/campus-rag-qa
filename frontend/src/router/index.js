@@ -1,17 +1,28 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import HealthView from '../views/HealthView.vue'
 import QaView from '../views/QaView.vue'
 import DocView from '../views/DocView.vue'
+import LoginView from '../views/LoginView.vue'
 import Placeholder from '../views/Placeholder.vue'
+import { isAdmin, isLoggedIn } from '../store/auth'
 
 /**
  * 路由表 = 侧边栏菜单的骨架。
  *
- * 现在只有"环境自检"是真页面，其余四个先落占位页。
- * 每做完一个模块，就把对应的 placeholder 换掉，菜单不用动。
+ * meta 里三个字段的用途：
+ * - title：菜单文字
+ * - public：不需要登录（只有登录页）
+ * - adminOnly：需要管理员角色；学生点进来会被送回问答页
  */
 const routes = [
-  { path: '/', redirect: '/health' },
+  { path: '/', redirect: '/qa' },
+  {
+    path: '/login',
+    name: 'login',
+    component: LoginView,
+    meta: { title: '登录', public: true }
+  },
   {
     path: '/health',
     name: 'health',
@@ -28,23 +39,45 @@ const routes = [
     path: '/documents',
     name: 'documents',
     component: DocView,
-    meta: { title: '文档管理' }
+    meta: { title: '文档管理', adminOnly: true }
   },
   {
     path: '/debug',
     name: 'debug',
     component: Placeholder,
-    meta: { title: '检索调试', todo: '第 4 步：五路检索对比 + 分数 + 改写前后' }
+    meta: { title: '检索调试', adminOnly: true, todo: '第 4 步：五路检索对比 + 分数 + 改写前后' }
   },
   {
     path: '/eval',
     name: 'eval',
     component: Placeholder,
-    meta: { title: '评测看板', todo: '第 5 步：跑评测 / 配置对比表 / 历史结果' }
+    meta: { title: '评测看板', adminOnly: true, todo: '第 5 步：跑评测 / 配置对比表 / 历史结果' }
   }
 ]
 
-export default createRouter({
+const router = createRouter({
   history: createWebHistory(),
   routes
 })
+
+/**
+ * 路由守卫：进页面前先判断"能不能进"。
+ *
+ * 注意这**不是**安全边界 —— 真正的安全在后端拦截器（谁都能改前端代码）。
+ * 这里只做体验：没登录别让人看到空白页，学生别点进管理员页再看到 403。
+ */
+router.beforeEach((to) => {
+  if (to.meta.public) {
+    return true
+  }
+  if (!isLoggedIn()) {
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  if (to.meta.adminOnly && !isAdmin()) {
+    ElMessage.warning('该页面仅管理员可用，已为你返回问答页')
+    return { path: '/qa' }
+  }
+  return true
+})
+
+export default router

@@ -74,3 +74,19 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     KEY idx_chunk_embedding_model (embedding_model)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '文本块';
 
+
+-- 用户表：登录与角色（学生只能问答，管理员才能动知识库）。
+-- password_hash = sha256(salt + 明文)，salt 每用户随机；不存明文。
+CREATE TABLE IF NOT EXISTS sys_user (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    username      VARCHAR(50)     NOT NULL              COMMENT '登录名',
+    password_hash CHAR(64)        NOT NULL              COMMENT 'sha256(salt+密码) 的十六进制',
+    salt          CHAR(32)        NOT NULL              COMMENT '每用户随机盐',
+    role          VARCHAR(20)     NOT NULL DEFAULT 'STUDENT' COMMENT 'ADMIN / STUDENT',
+    display_name  VARCHAR(50)     NULL                  COMMENT '显示名',
+    status        TINYINT         NOT NULL DEFAULT 1    COMMENT '1 正常 0 禁用',
+    last_login    DATETIME        NULL                  COMMENT '最后一次登录时间',
+    create_time   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_username (username)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '系统用户';

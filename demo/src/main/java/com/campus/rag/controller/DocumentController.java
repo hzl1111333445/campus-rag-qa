@@ -131,6 +131,31 @@ public class DocumentController {
     }
 
     /**
+     * 给"某一份"文档补向量：POST /api/document/{id}/embed
+     *
+     * <p>什么时候会用到：上传时向量化中途失败、或换了 embedding 模型要重算。
+     * 与全局的 /api/dev/embed-all 的区别是**只处理这一份**，不会顺带把别的文档也跑一遍。
+     */
+    @PostMapping("/{id}/embed")
+    public Map<String, Object> embed(@PathVariable long id) {
+        Map<String, Object> doc = documentDao.findById(id);
+        if (doc == null) {
+            throw new IllegalArgumentException("文档不存在：" + id);
+        }
+        Map<String, Object> embed = embeddingService.embedPendingOfDocument(id, 500);
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("id", id);
+        data.put("embeddedThisRun", embed.getOrDefault("embeddedThisRun", 0));
+        data.put("pendingBefore", embed.getOrDefault("pendingBefore", 0));
+        data.put("elapsedMs", embed.getOrDefault("elapsedMs", 0));
+        if (embed.get("error") != null) {
+            data.put("error", embed.get("error"));
+        }
+        return data;
+    }
+
+    /**
      * 删除一份文档：先删块，再删记录，最后删磁盘原文件。
      *
      * <p>为什么顺序不能反：kb_chunk 靠 document_id 关联，记录先删掉就再也找不到这些块了，

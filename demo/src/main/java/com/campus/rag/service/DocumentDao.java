@@ -43,8 +43,11 @@ public class DocumentDao {
     /** 分页查询，新的在前。 */
     public List<Map<String, Object>> page(int offset, int size) {
         return jdbc.queryForList(
-                "SELECT id, title, original_name, file_type, file_size, status, chunk_count, create_time " +
-                        "FROM kb_document ORDER BY id DESC LIMIT ? OFFSET ?", size, offset);
+                "SELECT d.id, d.title, d.original_name, d.file_type, d.file_size, d.status, d.chunk_count, " +
+                        "d.create_time, " +
+                        // 顺手带出"还差多少块没向量"：管理员页要给每行显示向量化状态
+                        "(SELECT COUNT(*) FROM kb_chunk c WHERE c.document_id = d.id AND c.embedding IS NULL) AS pending_chunks " +
+                        "FROM kb_document d ORDER BY d.id DESC LIMIT ? OFFSET ?", size, offset);
     }
 
     public long count() {

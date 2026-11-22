@@ -17,6 +17,7 @@ import http from '../api/http'
  *   POST   /api/document/upload             上传（后端同步做解析→切分→入库）
  *   GET    /api/document/{id}/chunks        某文档切出来的块
  *   POST   /api/document/{id}/reprocess     用磁盘上的原文件重新切一遍
+ *   POST   /api/document/{id}/embed         只给这一份文档补向量（新上传的文件用）
  *   DELETE /api/document/{id}               删文档（先删块再删记录）
  */
 
@@ -154,6 +155,26 @@ async function embedPending() {
   await load()
 }
 
+/**
+ * 单份文档补向量：只算这份里 embedding 为空的块。
+ *
+ * 为什么要有"按行"的按钮，而不是只留工具栏那个全局的？
+ * 上传后如果某份文件向量化失败，管理员需要知道"是哪一份出问题"，
+ * 并且能就地补一次 —— 全局按钮会把整个库扫一遍，看不出问题出在哪份。
+ */
+async function embedRow(row) {
+  const data = await http.post(`/document/${row.id}/embed`)
+  if (data.embeddedThisRun > 0) {
+    ElMessage.success(
+      `「${cleanTitle(row.title)}」补齐 ${data.embeddedThisRun} 块向量，耗时 ${data.elapsedMs} ms`
+    )
+  } else {
+    ElMessage.info('这份文档没有待向量化的块')
+  }
+  if (data.error) ElMessage.error(`向量化失败：${data.error}`)
+  await load()
+}
+
 async function reprocess(row) {
   await ElMessageBox.confirm(
     `用磁盘上的原文件重新切分「${cleanTitle(row.title)}」？块会被整份替换。`,
@@ -228,13 +249,13 @@ onMounted(async () => {
 
       <el-table v-loading="loading" :data="shown" stripe style="width: 100%">
         <el-table-column prop="id" label="ID" width="70" />
-        <el-table-column label="标题" min-width="320">
+        <el-table-column label="标题" min-width="260">
           <template #default="{ row }">
             <span :title="row.original_name">{{ cleanTitle(row.title) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="file_type" label="类型" width="80" />
-        <el-table-column label="大小" width="100">
+        <el-table-column label="大小" width="92">
           <template #default="{ row }">{{ sizeText(row.file_size) }}</template>
         </el-table-column>
         <el-table-column label="状态" width="90">
@@ -245,12 +266,27 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column prop="chunk_count" label="块数" width="80" />
-        <el-table-column label="入库时间" width="140">
+        <el-table-column label="向量" width="88">
+          <template #default="{ row }">
+            <el-tag v-if="!row.pending_chunks" type="success" size="small" effect="plain">已完整</el-tag>
+            <el-tag v-else type="warning" size="small" effect="light">缺 {{ row.pending_chunks }} 块</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="入库时间" width="150">
           <template #default="{ row }">{{ timeText(row.create_time) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right">
+        <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openChunks(row)">看块</el-button>
+            <el-button
+              link
+              type="primary"
+              :disabled="!row.pending_chunks"
+              :title="row.pending_chunks ? '给这份文档补算向量' : '这份文档的块都已向量化'"
+              @click="embedRow(row)"
+            >
+              向量化
+            </el-button>
             <el-button link type="primary" @click="reprocess(row)">重处理</el-button>
             <el-button link type="danger" @click="remove(row)">删除</el-button>
           </template>

@@ -89,3 +89,10 @@ campus:
 logging:
   level:
     com.campus.rag: debug      # 自己包的日志打详细点，方便看程序走到哪一步
+
+  # ---------- 登录与权限 ----------
+  # secret 是签名钥匙：换掉它，所有已发出的令牌立即失效。
+  # 生产环境必须用环境变量注入（AUTH_SECRET），绝不能把真钥匙提交进 Git。
+  auth:
+    secret: ${AUTH_SECRET:dev-only-change-me-in-production}
+    expire-minutes: ${AUTH_EXPIRE_MINUTES:720}   # 令牌有效期，默认 12 小时
