@@ -2,7 +2,7 @@
 import { nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import http, { httpRaw } from '../api/http'
+import http, { getToken } from '../api/http'
 import { isAdmin } from '../store/auth'
 
 /**
@@ -155,32 +155,133 @@ async function send(text) {
 
   messages.value.push({ id: nextId(), role: 'user', text: q })
   const replyId = nextId()
-  messages.value.push({ id: replyId, role: 'assistant', loading: true })
+  messages.value.push({
+    id: replyId,
+    role: 'assistant',
+    streaming: true,
+    stage: '正在检索规章…',
+    streamText: '',
+    sources: []
+  })
   input.value = ''
   sending.value = true
   scrollToBottom()
 
   try {
-    // httpRaw：返回完整响应，才能读到响应头里的 X-Session-Id
-    const resp = await httpRaw.post('/qa', {
-      question: q,
-      topK: topK.value,
-      sessionId: sessionId.value
-    })
-    const data = resp.data
-    const sid = resp.headers['x-session-id']
-    if (sid && String(sid) !== String(sessionId.value)) {
-      sessionId.value = Number(sid)
-      loadSessions()
-    }
-    const idx = messages.value.findIndex((m) => m.id === replyId)
-    if (idx >= 0) messages.value[idx] = { id: replyId, role: 'assistant', data }
+    await streamAsk(q, replyId)
+    loadSessions()
   } catch (e) {
-    const idx = messages.value.findIndex((m) => m.id === replyId)
-    if (idx >= 0) messages.value[idx] = { id: replyId, role: 'assistant', error: e.message }
+    patchMessage(replyId, { streaming: false, error: e.message || String(e) })
   } finally {
     sending.value = false
     scrollToBottom()
+  }
+}
+
+/** 局部更新某条消息（避免整条替换导致流式时闪烁）。 */
+function patchMessage(id, patch) {
+  const idx = messages.value.findIndex((m) => m.id === id)
+  if (idx >= 0) messages.value[idx] = { ...messages.value[idx], ...patch }
+}
+
+/**
+ * 流式提问：POST /api/qa/stream，手工解析 SSE。
+ *
+ * 为什么不用 EventSource？它只发 GET，而我们要 POST 送问题体。
+ * 为什么不用 httpRaw？axios 要等完整响应体，拿不到"逐字到达"的过程。
+ * 事件协议（后端 QaController）：meta → sources → token×N → done（或 error）。
+ */
+async function streamAsk(q, replyId) {
+  const token = getToken()
+  const resp = await fetch('/api/qa/stream', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify({ question: q, topK: topK.value, sessionId: sessionId.value })
+  })
+  if (!resp.ok || !resp.body) {
+    let detail = ''
+    try {
+      detail = await resp.text()
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(`HTTP ${resp.status} ${detail.slice(0, 200)}`)
+  }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let eventName = ''
+  let text = ''
+  let lastPaint = 0
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    // SSE 以空行分隔事件；这里按行处理，data 到达即派发
+    let idx
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).replace(/\r$/, '')
+      buffer = buffer.slice(idx + 1)
+      if (!line.trim()) continue
+      if (line.startsWith(':')) continue            // 心跳
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim()
+        continue
+      }
+      if (!line.startsWith('data:')) continue
+      const payload = line.slice(5).trim()
+      if (!payload) continue
+      let data
+      try {
+        data = JSON.parse(payload)
+      } catch {
+        continue
+      }
+
+      if (eventName === 'meta') {
+        if (data.sessionId && String(data.sessionId) !== String(sessionId.value)) {
+          sessionId.value = Number(data.sessionId)
+        }
+      } else if (eventName === 'sources') {
+        patchMessage(replyId, { sources: data.hits || [], stage: '正在组织回答…' })
+        scrollToBottom()
+      } else if (eventName === 'token') {
+        text += data.delta || ''
+        const now = Date.now()
+        // 每 50ms 才刷一次视图：每个 token 都触发渲染会让长回答掉帧
+        if (now - lastPaint > 50) {
+          lastPaint = now
+          patchMessage(replyId, { streamText: text, stage: '' })
+          scrollToBottom()
+        }
+      } else if (eventName === 'done') {
+        patchMessage(replyId, {
+          streaming: false,
+          streamText: '',
+          stage: '',
+          ttftMs: data.ttftMs,
+          totalMs: data.totalMs,
+          // 拒答题没有 token，答案在 done.answer 里
+          data: data.answer
+        })
+        scrollToBottom()
+      } else if (eventName === 'error') {
+        patchMessage(replyId, { streaming: false, error: data.message || '生成失败' })
+      }
+    }
+  }
+  // 流异常结束（没收到 done）时的兜底
+  const cur = messages.value.find((m) => m.id === replyId)
+  if (cur && cur.streaming) {
+    patchMessage(replyId, { streaming: false, streamText: '', stage: '' })
+    if (text) patchMessage(replyId, { data: { answer: text, references: [], retrievedCount: 0 } })
   }
 }
 
@@ -219,6 +320,20 @@ function docTitle(t) {
 function scoreText(v) {
   if (v === null || v === undefined) return '-'
   return Number(v).toFixed(4)
+}
+
+/**
+ * 引用标签要分三种情况，不能只分真假：
+ *   - 有编造编号 → 危险（这是真问题）
+ *   - 没编造但也没引用（拒答、常识性回答）→ 只是"没引用"，不是错
+ *   - 有引用且编号合法 → 通过
+ */
+function citeTag(data) {
+  const bad = (data.invalidCitations || []).length
+  const cited = (data.references || []).length
+  if (bad) return { type: 'danger', text: `引用编号异常（${bad} 处）` }
+  if (!cited) return { type: 'info', text: '未引用资料' }
+  return { type: 'success', text: '引用校验通过' }
 }
 
 function groundedTag(data) {
@@ -326,10 +441,19 @@ onMounted(async () => {
           <template v-else>
             <div class="avatar ai-avatar">AI</div>
 
-            <div v-if="m.loading" class="bubble ai-bubble">
-              <div class="typing">
+            <div v-if="m.streaming" class="bubble ai-bubble">
+              <div class="answer-head">
+                <el-tag v-if="m.stage" type="info" size="small" effect="plain">{{ m.stage }}</el-tag>
+                <el-tag v-if="m.sources && m.sources.length" size="small" effect="plain">
+                  已检索 {{ m.sources.length }} 条
+                </el-tag>
+              </div>
+              <div v-if="!m.streamText" class="typing">
                 <span></span><span></span><span></span>
-                <em class="typing-text">正在检索规章并生成回答…</em>
+                <em class="typing-text">{{ m.stage || '正在生成回答…' }}</em>
+              </div>
+              <div v-else class="answer-body">
+                <p>{{ m.streamText }}<span class="caret">▍</span></p>
               </div>
             </div>
 
@@ -341,9 +465,7 @@ onMounted(async () => {
             <div v-else class="bubble ai-bubble">
               <div class="answer-head">
                 <el-tag v-if="m.data.gated" type="warning" size="small" effect="dark">未检索到相关资料</el-tag>
-                <el-tag :type="m.data.citationOk ? 'success' : 'danger'" size="small">
-                  {{ m.data.citationOk ? '引用校验通过' : '引用编号异常' }}
-                </el-tag>
+                <el-tag :type="citeTag(m.data).type" size="small">{{ citeTag(m.data).text }}</el-tag>
                 <el-tag :type="groundedTag(m.data).type" size="small">{{ groundedTag(m.data).text }}</el-tag>
               </div>
 
@@ -388,7 +510,7 @@ onMounted(async () => {
               </div>
 
               <div class="answer-foot">
-                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms</span>
+                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms<template v-if="m.ttftMs"> · 首字 {{ m.ttftMs }} ms</template></span>
                 <span class="foot-actions">
                   <button class="foot-btn" @click="copyAnswer(m.data.answer)">复制</button>
                   <button class="foot-btn" @click="toggleRefs(m.id)">溯源</button>
@@ -659,6 +781,17 @@ onMounted(async () => {
     transform: translateY(-2px);
   }
 }
+.caret {
+  color: #409eff;
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 .typing-text {
   margin-left: 6px;
   font-style: normal;

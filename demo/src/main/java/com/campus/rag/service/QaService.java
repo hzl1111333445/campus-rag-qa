@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -82,7 +83,7 @@ public class QaService {
      * @param model             用的哪个模型
      * @param references        引用了哪几个块（前端用来显示"出处"卡片）
      * @param retrievedCount    检索回来几个块
-     * @param citationOk        回答里的编号是否全部合法（没有编造）
+     * @param citationOk        回答里的编号是否全部合法（没有编造）；true 不代表一定有引用
      * @param invalidCitations  编造的编号（比如资料只有 3 条，它却写了 [5]）
      * @param grounded          回答里的硬事实是否都能在被引用的原文里找到（接地校验，见 docs/10）
      * @param factCount         一共抽出几条可核对的硬事实（0 表示这段回答里没有数字/时间/处分名，无从核对）
@@ -133,11 +134,85 @@ public class QaService {
                     history.size(), ContextAssembler.describe(history));
         }
 
+        Prepared prepared = prepare(question, topK, history, begin);
+        if (prepared.earlyAnswer() != null) {
+            return prepared.earlyAnswer();     // 没检索到 / 分数低于阈值：检索层就拒答，不花钱
+        }
+        List<RetrievalService.Hit> hits = prepared.best().hits();
+
+        // ---------- 第 2~3 步：生成回答 ----------
+        // 两段式（默认关闭）：①先只摘原句 ②再只用原句组答案。详见 docs/16。
+        int evidenceCount = 0;
+        String answer;
+        if (llmProperties.isTwoStage()) {
+            List<PromptBuilder.Quote> quotes = extractQuotes(question, hits);
+            evidenceCount = quotes.size();
+            if (quotes.isEmpty()) {
+                // 第一步一条都没摘到：可能是资料确实不相关，也可能模型输出格式坏了。
+                // 这种情况退回单段式，保证系统不会因为"第一步失败"而答不了。
+                log.info("两段式第一步没摘出证据，回退单段式生成");
+                answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
+            } else {
+                log.debug("两段式：摘到 {} 条原句，用它组答案", quotes.size());
+                answer = chatClient.chat(promptBuilder.buildAnswerMessagesFromQuotes(question, quotes, hits));
+            }
+        } else {
+            answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
+        }
+
+        Validated validated = validate(answer, hits);
+        return build(question, answer, hits, prepared, validated, evidenceCount, begin);
+    }
+
+    /**
+     * 流式问答：边生成边把文字增量交出去。
+     *
+     * <p>与 {@link #ask} 的关系：检索、拒答判定、引用校验、接地校验全部<b>共用同一套代码</b>
+     * （{@link #prepare} + {@link #validate}），只有"生成"这一步从"等整段"换成"边收边给"。
+     * 这样两条路的结果标准不会跑偏。
+     *
+     * <p>两个刻意的取舍：
+     * <ul>
+     *   <li><b>不走两段式</b>：两段式的第一步要等模型输出完整 JSON，天然没有流式可给；
+     *       两段式默认就是关的，流式路径固定单段式。</li>
+     *   <li><b>先回调 hits 再生成</b>：检索那 0.5~1.5 秒用户本来只能干等，
+     *       先把"查到了哪几条资料"发出去，界面就不会像卡死。</li>
+     * </ul>
+     *
+     * @param onHits  检索完成时回调（拒答时也可能是空列表）
+     * @param onToken 每段文字回调一次
+     */
+    public QaAnswer stream(String question, int topK, List<ContextAssembler.Turn> history,
+                           Consumer<List<RetrievalService.Hit>> onHits,
+                           Consumer<String> onToken) {
+        long begin = System.currentTimeMillis();
+        if (history != null && !history.isEmpty()) {
+            log.info("多轮：携带 {} 条历史（用于理解指代）：{}",
+                    history.size(), ContextAssembler.describe(history));
+        }
+
+        Prepared prepared = prepare(question, topK, history, begin);
+        onHits.accept(prepared.best() == null ? List.of() : prepared.best().hits());
+        if (prepared.earlyAnswer() != null) {
+            return prepared.earlyAnswer();
+        }
+        List<RetrievalService.Hit> hits = prepared.best().hits();
+        if (llmProperties.isTwoStage()) {
+            log.info("两段式开启时流式路径仍按单段式生成（两段式第一步要等完整 JSON，没有流式可给）");
+        }
+
+        String answer = chatClient.chatStream(promptBuilder.buildMessages(question, hits, history), onToken);
+        Validated validated = validate(answer, hits);
+        return build(question, answer, hits, prepared, validated, 0, begin);
+    }
+
+    /** 检索 + 拒答判定（两条生成路径共用）。 */
+    private Prepared prepare(String question, int topK, List<ContextAssembler.Turn> history, long begin) {
         // ---------- 第 0 步：追问补全（多轮专用，只在"这句话自己检索不明白"时才做）----------
         // 先按原句检索一次：分数高说明这句话自己就够清楚，没必要补（省一次模型调用 + 一次检索）
         // 分数低 + 有历史 → 才用历史把它补成完整问题，再检索一次
         String standaloneQuestion = null;
-        RetrievalService.Best best = null;
+        RetrievalService.Best best;
         if (history != null && !history.isEmpty() && followupTriggerScore > 0) {
             best = retrievalService.searchBestGated(question, topK);
             if (best.topScore() < followupTriggerScore && !best.gated()) {
@@ -160,52 +235,40 @@ public class QaService {
         } else {
             best = retrievalService.searchBestGated(question, topK);
         }
-        List<RetrievalService.Hit> hits = best.hits();
 
         // 一条都没检索到：连资料都没有，直接拒答（不花钱）
-        if (hits.isEmpty()) {
-            return new QaAnswer(question,
+        if (best.hits().isEmpty()) {
+            return new Prepared(best, standaloneQuestion, new QaAnswer(question,
                     "本知识库暂未收录与该问题相关的规定，建议咨询学校相关职能部门或查看学校官网。",
                     chatClient.model(), List.of(), 0, true, List.of(),
                     true, 0, List.of(), 0.0, true, 0, standaloneQuestion,
-                    System.currentTimeMillis() - begin);
+                    System.currentTimeMillis() - begin));
         }
 
         // 检索分数低于阈值：资料太不相关，问了模型也只能编 → 在检索层就拒答
         // 这是"宁可说没查到，也不猜"的工程化实现，见 docs/09-拒答阈值
         if (best.gated()) {
-            return new QaAnswer(question,
+            return new Prepared(best, standaloneQuestion, new QaAnswer(question,
                     "本知识库暂未收录与该问题相关的规定（检索置信度不足，最高相关度 "
                             + best.topScore() + "，低于阈值 " + best.threshold() + "）。\n\n"
                             + "你可以换一种问法重试，也可以直接咨询学校相关职能部门。",
-                    chatClient.model(), List.of(), hits.size(), true, List.of(),
+                    chatClient.model(), List.of(), best.hits().size(), true, List.of(),
                     true, 0, List.of(), best.topScore(), true, 0, standaloneQuestion,
-                    System.currentTimeMillis() - begin);
+                    System.currentTimeMillis() - begin));
         }
+        return new Prepared(best, standaloneQuestion, null);
+    }
 
-        // ---------- 第 2~3 步：生成回答 ----------
-        // 两段式（默认）：①先只摘原句 ②再只用原句组答案。详见 docs/16。
-        int evidenceCount = 0;
-        String answer;
-        if (llmProperties.isTwoStage()) {
-            List<PromptBuilder.Quote> quotes = extractQuotes(question, hits);
-            evidenceCount = quotes.size();
-            if (quotes.isEmpty()) {
-                // 第一步一条都没摘到：可能是资料确实不相关，也可能模型输出格式坏了。
-                // 这种情况退回单段式，保证系统不会因为"第一步失败"而答不了。
-                log.info("两段式第一步没摘出证据，回退单段式生成");
-                answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
-            } else {
-                log.debug("两段式：摘到 {} 条原句，用它组答案", quotes.size());
-                answer = chatClient.chat(promptBuilder.buildAnswerMessagesFromQuotes(question, quotes, hits));
-            }
-        } else {
-            answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
-        }
-
-        // ---------- 第 4 步：校验引用编号 ----------
-        // 为什么必须校验？模型有可能会写出资料里不存在的编号（比如只有 3 条却标 [5]），
-        // 前端就会显示一个点不开的"出处"，用户信任瞬间崩塌。
+    /**
+     * 校验 + 组装（两条生成路径共用）。
+     *
+     * <p>第 4 步校验引用编号：模型有可能会写出资料里不存在的编号（比如只有 3 条却标 [5]），
+     * 前端就会显示一个点不开的"出处"，用户信任瞬间崩塌。
+     *
+     * <p>第 5 步接地校验：编号合法不等于出处正确。真实案例——问"违纪处分有哪几种"，
+     * 模型把五种处分答对了却标到 [2]，而清单其实在第 3 块里（被切分劈到了下一块）。
+     */
+    private Validated validate(String answer, List<RetrievalService.Hit> hits) {
         List<Integer> cited = new ArrayList<>();
         List<Integer> invalid = new ArrayList<>();
         Matcher m = CITATION.matcher(answer);
@@ -219,40 +282,51 @@ public class QaService {
                 invalid.add(n);
             }
         }
-        boolean citationOk = invalid.isEmpty() && !cited.isEmpty();
+        // 语义：citationOk 只表示『没有编造出资料里不存在的编号』。
+        // 拒答/无据回答本来就不该带编号，不能因为『没引用』判成『校验不通过』——
+        // 是否真的引用了资料，看 references 的条数（前端显示『未引用资料』）。
+        boolean citationOk = invalid.isEmpty();
         if (!invalid.isEmpty()) {
             log.warn("模型编造了不存在的引用编号 {}，资料只有 {} 条", invalid, hits.size());
         }
 
-        // ---------- 第 5 步：接地校验（groundedness）----------
-        // 编号校验只能保证"第 n 条引用存在"，不能保证"这个事实真的来自第 n 条引用"。
-        // 真实案例：问"违纪处分有哪几种"，模型把五种处分答对了，却标到 [2]，
-        // 而那份清单其实在第 3 块里（被切分劈到了下一块）。编号合法，但出处是假的。
-        // 做法：从回答里抽"硬事实"（数字+单位、时间点、处分名称），逐个到被引用块的原文里找。
         List<String> citedContents = new ArrayList<>();
         for (int n : cited) {
             citedContents.add(hits.get(n - 1).content());
         }
         AnswerGuard.Check guard = AnswerGuard.check(answer, citedContents);
         // factCount==0 表示这段回答里没有可核对的硬事实，此时不判"不合格"，只如实上报"核了 0 条"
-        boolean grounded = guard.missing().isEmpty();
         if (!guard.missing().isEmpty()) {
             log.warn("回答里有 {} 处事实在被引用原文中找不到：{}", guard.missingCount(), guard.missing());
         }
 
-        // ---------- 第 6 步：组装引用列表 ----------
-        // 只返回"回答里真的用到了"的引用，没用到的就不显示，避免噪音
+        // 第 6 步：只返回"回答里真的用到了"的引用，没用到的就不显示，避免噪音
         List<Reference> references = new ArrayList<>();
         for (int n : cited) {
             RetrievalService.Hit h = hits.get(n - 1);
             references.add(new Reference(n, h.chunkId(), h.documentTitle(), h.chunkIndex(),
                     h.score(), h.content()));
         }
+        return new Validated(cited, invalid, citationOk, guard, references);
+    }
 
-        return new QaAnswer(question, answer, chatClient.model(), references, hits.size(),
-                citationOk, invalid, grounded, guard.factCount(), guard.missing(),
-                best.topScore(), false, evidenceCount, standaloneQuestion,
-                System.currentTimeMillis() - begin);
+    /** 把 16 个字段拼成一个 QaAnswer（两条路径共用，避免字段顺序写错） */
+    private QaAnswer build(String question, String answer, List<RetrievalService.Hit> hits,
+                           Prepared prepared, Validated validated, int evidenceCount, long begin) {
+        AnswerGuard.Check guard = validated.guard();
+        return new QaAnswer(question, answer, chatClient.model(), validated.references(), hits.size(),
+                validated.citationOk(), validated.invalid(), guard.missing().isEmpty(),
+                guard.factCount(), guard.missing(), prepared.best().topScore(), false,
+                evidenceCount, prepared.standaloneQuestion(), System.currentTimeMillis() - begin);
+    }
+
+    /** 检索阶段的结果：earlyAnswer 不为 null 表示"检索层就决定了不生成" */
+    private record Prepared(RetrievalService.Best best, String standaloneQuestion, QaAnswer earlyAnswer) {
+    }
+
+    /** 校验阶段的结果 */
+    private record Validated(List<Integer> cited, List<Integer> invalid, boolean citationOk,
+                             AnswerGuard.Check guard, List<Reference> references) {
     }
 
     /**

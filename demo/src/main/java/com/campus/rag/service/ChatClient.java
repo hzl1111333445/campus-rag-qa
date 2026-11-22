@@ -1,6 +1,7 @@
 package com.campus.rag.service;
 
 import com.campus.rag.config.LlmProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,10 +12,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * 调 DeepSeek 的对话接口（OpenAI 兼容格式）。
@@ -38,9 +48,15 @@ public class ChatClient {
 
     private final LlmProperties props;
     private final RestClient http;
+    /** 流式用的客户端：JDK 自带 HttpClient，支持边下边读（RestClient 的流式要另配 converter，太重） */
+    private final HttpClient streamHttp = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
+    private final ObjectMapper objectMapper;
 
-    public ChatClient(LlmProperties props) {
+    public ChatClient(LlmProperties props, ObjectMapper objectMapper) {
         this.props = props;
+        this.objectMapper = objectMapper;
 
         // 连接超时 10 秒；读超时给久一点，模型有时候要算十几秒
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -96,6 +112,117 @@ public class ChatClient {
         return content == null ? "" : content;
     }
 
+    /**
+     * 流式生成：每收到一小段文字就回调一次。
+     *
+     * <p><b>为什么单独用 JDK 的 HttpClient，而不复用上面的 RestClient？</b>
+     * 上面那套是"发请求 → 等完整响应体 → 反序列化"，天然拿不到中间过程。
+     * 流式要的是"响应体还没结束就开始读"，用 {@code BodyHandlers.ofInputStream()} 拿到字节流逐行解析最直接，
+     * 不用为了一个接口把整个客户端换成 WebFlux。
+     *
+     * <p>上游是 OpenAI 兼容格式，每一行形如：
+     * <pre>
+     * data: {"choices":[{"delta":{"content":"每"}}]}
+     * data: {"choices":[{"delta":{"content":"学期"}}]}
+     * data: [DONE]
+     * </pre>
+     *
+     * @param onToken 每收到一段文字回调一次（可能一次几个字，也可能一次一句）
+     * @return 拼接后的完整回答（和 {@link #chat} 的返回值等价，方便上层继续做引用校验）
+     */
+    public String chatStream(List<Map<String, String>> messages, Consumer<String> onToken) {
+        if (props.getApiKey() == null || props.getApiKey().isBlank()) {
+            throw new IllegalStateException("campus.llm.api-key 是空的，请在 application-local.yml 里填 DeepSeek 的 key");
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", props.getModel());
+        body.put("messages", messages);
+        body.put("temperature", props.getTemperature());
+        body.put("max_tokens", props.getMaxTokens());
+        body.put("stream", true);
+
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(body);
+        } catch (Exception e) {
+            throw new IllegalStateException("请求体序列化失败：" + e.getMessage());
+        }
+
+        HttpRequest request;
+        try {
+            request = HttpRequest.newBuilder()
+                    .uri(URI.create(trimSlash(props.getBaseUrl()) + "/chat/completions"))
+                    .timeout(Duration.ofSeconds(props.getTimeoutSeconds()))
+                    .header("Authorization", "Bearer " + props.getApiKey())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
+                    .build();
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("流式请求构造失败：" + e.getMessage());
+        }
+
+        StringBuilder answer = new StringBuilder();
+        try {
+            HttpResponse<InputStream> response = streamHttp.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            if (response.statusCode() != 200) {
+                String err = new String(response.body().readAllBytes(), StandardCharsets.UTF_8);
+                throw new IllegalStateException("调用大模型失败：" + response.statusCode() + " " + explain(err));
+            }
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isEmpty() || line.startsWith(":")) {
+                        continue;   // 空行是分隔符，冒号开头是注释/心跳
+                    }
+                    if (!line.startsWith("data:")) {
+                        continue;
+                    }
+                    String payload = line.substring(5).trim();
+                    if ("[DONE]".equals(payload)) {
+                        break;
+                    }
+                    String delta = deltaOf(payload);
+                    if (delta != null && !delta.isEmpty()) {
+                        answer.append(delta);
+                        onToken.accept(delta);
+                    }
+                }
+            }
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("流式调用被中断");
+        } catch (Exception e) {
+            throw new IllegalStateException("流式调用失败：" + e.getMessage());
+        }
+
+        log.debug("流式返回 {} 字，模型 {}", answer.length(), props.getModel());
+        return answer.toString();
+    }
+
+    /** 从一帧增量里取出文字；解析不了就返回 null（不因为一条坏帧把整个回答打断） */
+    private String deltaOf(String payload) {
+        try {
+            StreamChunk chunk = objectMapper.readValue(payload, StreamChunk.class);
+            if (chunk == null || chunk.choices() == null || chunk.choices().isEmpty()) {
+                return null;
+            }
+            Delta delta = chunk.choices().get(0).delta();
+            return delta == null ? null : delta.content();
+        } catch (Exception e) {
+            log.debug("跳过一条解析不了的流式帧：{}", payload.length() > 120 ? payload.substring(0, 120) : payload);
+            return null;
+        }
+    }
+
+    private static String trimSlash(String url) {
+        return url != null && url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+    }
+
     private static String explain(String body) {
         String s = body == null ? "" : body;
         String b = s.toLowerCase();
@@ -126,5 +253,18 @@ public class ChatClient {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     record Message(String role, String content) {
+    }
+
+    /** 流式增量帧：{"choices":[{"delta":{"content":"每"}}]} */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record StreamChunk(List<StreamChoice> choices) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record StreamChoice(Delta delta) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record Delta(String content) {
     }
 }

@@ -3,6 +3,7 @@ package com.campus.rag.controller;
 import com.campus.rag.config.AuthInterceptor;
 import com.campus.rag.service.AuthService;
 import com.campus.rag.service.QaService;
+import com.campus.rag.service.RetrievalService;
 import com.campus.rag.service.ContextAssembler;
 import com.campus.rag.service.SessionAccess;
 import com.campus.rag.service.SessionDao;
@@ -10,7 +11,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -20,8 +23,17 @@ import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.annotation.PreDestroy;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 问答接口：检索 + 生成 + 引用。
@@ -49,6 +61,19 @@ public class QaController {
 
     private static final Logger log = LoggerFactory.getLogger(QaController.class);
 
+    /**
+     * 流式生成专用的线程池。
+     *
+     * <p>为什么不能直接在这条请求里跑：SSE 是一条长连接，一次问答要占住线程 2~10 秒。
+     * 如果直接跑在 Tomcat 的工作线程（默认 200 个，但同一时刻能接受的连接远少于此）上，
+     * 十几个人同时问就会开始排队。这里用独立池 + 有限并发，把"慢"关在业务自己的笼子里。
+     */
+    private final ExecutorService streamExecutor = Executors.newFixedThreadPool(8, r -> {
+        Thread t = new Thread(r, "qa-stream");
+        t.setDaemon(true);
+        return t;
+    });
+
     private final QaService qaService;
     private final SessionDao sessionDao;
     private final ContextAssembler contextAssembler;
@@ -71,7 +96,8 @@ public class QaController {
             @RequestBody AskRequest req,
             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
             @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role,
-            @RequestHeader(value = "X-No-Persist", required = false) String noPersist) {
+            @RequestHeader(value = "X-No-Persist", required = false) String noPersist,
+            jakarta.servlet.http.HttpServletResponse response) {
         if (req == null || req.question() == null || req.question().isBlank()) {
             throw new IllegalArgumentException("question 不能为空");
         }
@@ -119,6 +145,141 @@ public class QaController {
         return ResponseEntity.ok()
                 .header("X-Session-Id", String.valueOf(sessionId))
                 .body(answer);
+    }
+
+    /**
+     * 流式问答（SSE）。
+     *
+     * <p>事件顺序是刻意设计的：
+     * <pre>
+     * event: meta     {sessionId, topK}                          —— 建/复用会话，前端先拿到 id
+     * event: sources  {hits:[{n,title,chunkIndex,score}]}         —— 检索完成，先让用户看到"查到了什么"
+     * event: token    {delta:"每"}   （若干次）                    —— 文字增量
+     * event: done     {answer:..., references:[...], ttftMs, totalMs} —— 引用校验/接地校验结果
+     * event: error    {message}                                   —— 出错（此时 HTTP 200 已经发出去，改不了状态码）
+     * </pre>
+     *
+     * <p>为什么不复用 POST /api/qa：那里是"等整段生成完再返回"，拿不到中间过程；
+     * 而且它的返回体结构已经被评测脚本依赖，改它就是改契约。这里新增一条路，老的保持不动。
+     */
+    @PostMapping("/stream")
+    public SseEmitter stream(
+            @RequestBody AskRequest req,
+            @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
+            @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role,
+            @RequestHeader(value = "X-No-Persist", required = false) String noPersist,
+            jakarta.servlet.http.HttpServletResponse response) {
+        if (req == null || req.question() == null || req.question().isBlank()) {
+            throw new IllegalArgumentException("question 不能为空");
+        }
+        String question = req.question().trim();
+        int topK = req.topK() == null ? 3 : Math.max(1, req.topK());
+        boolean persist = !(noPersist != null
+                && (noPersist.equals("1") || noPersist.equalsIgnoreCase("true")));
+
+        // 会话与历史都在"开始推流之前"确定好，这样出错能直接抛给全局异常处理器（状态码正常）
+        long sessionId = 0L;
+        List<ContextAssembler.Turn> history = List.of();
+        if (persist) {
+            sessionId = resolveSession(req.sessionId(), question, userId,
+                    AuthService.ROLE_ADMIN.equals(role));
+            history = contextAssembler.load(sessionDao, sessionId);
+        }
+        // 与同步接口保持一致：会话号同时放响应头（meta 事件里也有一份，头是为了和 /api/qa 对齐）
+        if (persist && sessionId > 0) {
+            response.setHeader("X-Session-Id", String.valueOf(sessionId));
+        }
+        final long sid = sessionId;
+        final List<ContextAssembler.Turn> hist = history;
+
+        SseEmitter emitter = new SseEmitter(0L);   // 0 = 不超时，由客户端断开决定生命周期
+        streamExecutor.submit(() -> runStream(emitter, question, topK, sid, hist, persist));
+        return emitter;
+    }
+
+    private void runStream(SseEmitter emitter, String question, int topK, long sessionId,
+                           List<ContextAssembler.Turn> history, boolean persist) {
+        long begin = System.currentTimeMillis();
+        AtomicLong firstTokenAt = new AtomicLong(0);
+        try {
+            emitter.send(event("meta", Map.of("sessionId", sessionId, "topK", topK)));
+
+            QaService.QaAnswer answer = qaService.stream(question, topK, history,
+                    hits -> sendSources(emitter, hits),
+                    delta -> {
+                        if (firstTokenAt.compareAndSet(0, System.currentTimeMillis())) {
+                            log.info("流式首字：{}ms", firstTokenAt.get() - begin);
+                        }
+                        send(emitter, "token", Map.of("delta", delta));
+                    });
+
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("answer", answer);
+            long ttft = firstTokenAt.get() > 0 ? firstTokenAt.get() - begin : 0;
+            done.put("ttftMs", ttft);
+            done.put("totalMs", System.currentTimeMillis() - begin);
+            send(emitter, "done", done);
+            emitter.complete();
+
+            if (persist) {
+                saveMessages(sessionId, question, answer);
+            }
+        } catch (Exception e) {
+            log.warn("流式问答失败：{}", e.toString());
+            try {
+                send(emitter, "error", Map.of("message", e.getMessage() == null ? e.toString() : e.getMessage()));
+            } catch (Exception ignored) {
+                // 客户端已经断开，发不出去就算了
+            }
+            emitter.complete();
+        }
+    }
+
+    /** 检索结果先发出去：把 n / 文档名 / 块号 / 分数给前端，让用户先看到"查到了这几条" */
+    private void sendSources(SseEmitter emitter, List<RetrievalService.Hit> hits) {
+        List<Map<String, Object>> list = new ArrayList<>();
+        int n = 0;
+        for (RetrievalService.Hit h : hits) {
+            n++;
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("n", n);
+            m.put("documentTitle", h.documentTitle());
+            m.put("chunkIndex", h.chunkIndex());
+            m.put("score", h.score());
+            list.add(m);
+        }
+        send(emitter, "sources", Map.of("hits", list, "count", list.size()));
+    }
+
+    private void send(SseEmitter emitter, String event, Object data) {
+        try {
+            emitter.send(SseEmitter.event().name(event).data(data, MediaType.APPLICATION_JSON));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);   // 客户端断开：往上抛，交给 runStream 收尾
+        }
+    }
+
+    private SseEmitter.SseEventBuilder event(String name, Object data) {
+        return SseEmitter.event().name(name).data(data, MediaType.APPLICATION_JSON);
+    }
+
+    /** 把一问一答落库（流式路径也复用，保证历史和普通问答一致） */
+    private void saveMessages(long sessionId, String question, QaService.QaAnswer answer) {
+        try {
+            sessionDao.insertMessage(sessionId, "user", question,
+                    false, null, null, null, null, null, null, null);
+            sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
+                    answer.gated(), answer.citationOk(), answer.grounded(), answer.factCount(),
+                    answer.topScore(), answer.elapsedMs(), toJson(answer.references()),
+                    joinFacts(answer.missingFacts()));
+        } catch (Exception e) {
+            log.warn("保存会话消息失败 sessionId={}: {}", sessionId, e.toString());
+        }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        streamExecutor.shutdownNow();
     }
 
     /** 调试：只看检索结果和拼好的提示词，不调模型；带 sessionId 时连多轮历史一起看 */
