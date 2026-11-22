@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>校园规章制度智能问答系统</title>
+<style>
+    :root {
+        --primary: #2563eb;
+        --primary-dark: #1d4ed8;
+        --bg: #f6f7fb;
+        --card: #ffffff;
+        --border: #e5e7eb;
+        --text: #111827;
+        --muted: #6b7280;
+        --ok: #059669;
+        --warn: #d97706;
+        --danger: #dc2626;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.7;
+    }
+
+    header {
+        background: #fff;
+        border-bottom: 1px solid var(--border);
+        padding: 16px 32px;
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+    }
+    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    header .sub { font-size: 13px; color: var(--muted); }
+    header .spacer { flex: 1; }
+    header .stats { font-size: 12px; color: var(--muted); }
+
+    .tabs {
+        display: flex;
+        gap: 8px;
+        padding: 16px 32px 0;
+    }
+    .tab {
+        padding: 8px 18px;
+        border-radius: 8px 8px 0 0;
+        border: 1px solid transparent;
+        border-bottom: none;
+        cursor: pointer;
+        font-size: 14px;
+        color: var(--muted);
+        background: transparent;
+    }
+    .tab.active {
+        background: #fff;
+        border-color: var(--border);
+        color: var(--primary);
+        font-weight: 600;
+    }
+
+    main { padding: 0 32px 48px; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 20px 24px;
+        margin-top: 16px;
+    }
+
+    .ask-row { display: flex; gap: 10px; }
+    input[type="text"] {
+        flex: 1;
+        padding: 12px 14px;
+        font-size: 15px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        outline: none;
+        font-family: inherit;
+    }
+    input[type="text"]:focus { border-color: var(--primary); }
+
+    button {
+        padding: 12px 22px;
+        font-size: 15px;
+        border: none;
+        border-radius: 8px;
+        background: var(--primary);
+        color: #fff;
+        cursor: pointer;
+        font-family: inherit;
+        white-space: nowrap;
+    }
+    button:hover { background: var(--primary-dark); }
+    button:disabled { background: #9ca3af; cursor: not-allowed; }
+    button.ghost {
+        background: #fff;
+        color: var(--primary);
+        border: 1px solid var(--primary);
+    }
+    button.ghost:hover { background: #eff6ff; }
+
+    .examples {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+    }
+    .chip {
+        font-size: 13px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: #eff6ff;
+        color: var(--primary);
+        cursor: pointer;
+        border: 1px solid #dbeafe;
+    }
+    .chip:hover { background: #dbeafe; }
+
+    .meta {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 12px;
+    }
+    .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 500;
+    }
+    .badge.ok { background: #d1fae5; color: var(--ok); }
+    .badge.warn { background: #fef3c7; color: var(--warn); }
+    .badge.err { background: #fee2e2; color: var(--danger); }
+
+    .answer {
+        font-size: 15px;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    .cite {
+        color: var(--primary);
+        background: #eff6ff;
+        border-radius: 4px;
+        padding: 0 4px;
+        font-size: 12px;
+        cursor: pointer;
+        margin: 0 1px;
+    }
+    .cite:hover { background: #dbeafe; }
+
+    h3.section {
+        font-size: 14px;
+        color: var(--muted);
+        font-weight: 600;
+        margin: 24px 0 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .ref {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        background: #fafafa;
+    }
+    .ref.highlight { border-color: var(--primary); background: #eff6ff; }
+    .ref-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        margin-bottom: 6px;
+    }
+    .ref-no {
+        background: var(--primary);
+        color: #fff;
+        border-radius: 4px;
+        padding: 0 6px;
+        font-size: 12px;
+    }
+    .ref-title { font-weight: 600; }
+    .ref-info { color: var(--muted); font-size: 12px; }
+    .ref-body {
+        font-size: 13px;
+        color: #374151;
+        white-space: pre-wrap;
+        max-height: 120px;
+        overflow: hidden;
+        position: relative;
+        cursor: pointer;
+    }
+    .ref-body.expanded { max-height: none; }
+    .ref-body::after {
+        content: "";
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        height: 28px;
+        background: linear-gradient(transparent, #fafafa);
+    }
+    .ref-body.expanded::after { display: none; }
+
+    .compare-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+    }
+    @media (max-width: 960px) {
+        .compare-grid { grid-template-columns: 1fr; }
+    }
+    .col {
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+    }
+    .col h4 { margin: 0 0 10px; font-size: 14px; }
+    .col .hit {
+        border-left: 3px solid var(--border);
+        padding: 6px 0 6px 10px;
+        margin-bottom: 8px;
+        font-size: 13px;
+    }
+    .col .hit .score { color: var(--muted); font-size: 12px; }
+    .col .hit .txt { color: #6b7280; font-size: 12px; display: block; margin-top: 2px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 40px 0; }
+    .loading { color: var(--primary); font-size: 14px; }
+    .errbox { color: var(--danger); font-size: 14px; white-space: pre-wrap; }
+    footer { text-align: center; color: var(--muted); font-size: 12px; padding: 24px; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>校园规章制度智能问答系统</h1>
+    <span class="sub">Spring Boot 3.5 · RAG · 引用溯源</span>
+    <span class="spacer"></span>
+    <span class="stats" id="stats">加载中…</span>
+</header>
+
+<div class="tabs">
+    <button class="tab active" data-panel="qa">智能问答</button>
+    <button class="tab" data-panel="compare">检索对比</button>
+    <button class="tab" data-panel="eval">评测看板</button>
+</div>
+
+<main>
+    <!-- ================= 问答 ================= -->
+    <section class="panel active" id="panel-qa">
+        <div class="card">
+            <div class="ask-row">
+                <input type="text" id="q" placeholder="问点什么，比如：转专业需要满足什么条件？"
+                       autocomplete="off">
+                <button id="askBtn">提问</button>
+            </div>
+            <div class="examples" id="examples"></div>
+        </div>
+
+        <div class="card" id="qaResult" style="display:none">
+            <div class="meta" id="qaMeta"></div>
+            <div class="answer" id="answer"></div>
+            <h3 class="section" id="refsTitle" style="display:none">引用原文（点编号可跳转）</h3>
+            <div id="refs"></div>
+        </div>
+    </section>
+
+    <!-- ================= 检索对比 ================= -->
+    <section class="panel" id="panel-compare">
+        <div class="card">
+            <div class="ask-row">
+                <input type="text" id="cq" placeholder="输入一个问题，同时看三种检索方式的结果" autocomplete="off">
+                <button id="cmpBtn">对比</button>
+            </div>
+            <p style="font-size:13px;color:#6b7280;margin:10px 0 0">
+                纯向量看"意思像不像"，BM25 看"字面有没有"，混合用 RRF 按名次融合。
+                <b>要看排名，不要比分数</b>——三种分数不在同一个量纲上。
+            </p>
+        </div>
+        <div class="compare-grid" id="cmpGrid"></div>
+    </section>
+
+    <!-- ================= 评测看板 ================= -->
+    <section class="panel" id="panel-eval">
+        <div class="card">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <button id="evalBtn">跑一遍评测</button>
+                <span style="font-size:13px;color:#6b7280">
+                    用 36 道题跑全部检索配置，看 Recall@3 与 MRR（约 25 秒，其中 4 道"库内无答案"题不计入命中统计）
+                </span>
+            </div>
+            <p style="font-size:13px;color:#6b7280;margin:12px 0 0">
+                <b>Recall@3</b>：正确答案是否出现在前 3 条里；<b>MRR</b>：正确答案排得越靠前越接近 1。
+                题目集在 <code>data/testset/eval_questions.tsv</code>，可以自己加题。
+            </p>
+        </div>
+        <div class="card" id="evalResult" style="display:none">
+            <div class="meta" id="evalMeta"></div>
+            <table id="evalTable" style="width:100%;border-collapse:collapse;font-size:14px">
+                <thead></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </section>
+</main>
+
+<footer>数据来源：广州软件学院公开规章制度 · 回答由大模型基于检索到的原文生成，请以正式文件为准</footer>
+
+<script>
+    // ---------------- 通用 ----------------
+    const $ = (id) => document.getElementById(id);
+
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    // 统一响应体拆包：后端的 /api/eval 用的是 {code, message, data} 包装，
+    // /api/qa、/api/search 是裸对象。这里统一处理，页面各处就不用各写一遍。
+    function unwrap(json) {
+        if (json && typeof json === 'object' && typeof json.code === 'number' && 'data' in json) {
+            if (json.code !== 0) throw new Error(json.message || ('业务错误 ' + json.code));
+            return json.data;
+        }
+        return json;
+    }
+
+    async function postJson(url, body) {
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch (e) { throw new Error('服务返回的不是 JSON：' + text.slice(0, 200)); }
+        if (!resp.ok) throw new Error((data && data.message) || ('HTTP ' + resp.status));
+        return unwrap(data);
+    }
+
+    async function getJson(url) {
+        const resp = await fetch(url);
+        const text = await resp.text();
+        try { return unwrap(JSON.parse(text)); } catch (e) { throw new Error('服务返回的不是 JSON：' + text.slice(0, 200)); }
+    }
+
+    // ---------------- 标签切换 ----------------
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            tab.classList.add('active');
+            $('panel-' + tab.dataset.panel).classList.add('active');
+        });
+    });
+
+    // ---------------- 顶部统计 ----------------
+    (async function loadStats() {
+        try {
+            const s = await getJson('/api/search/stats');
+            $('stats').textContent =
+                `索引 ${s.size} 块 · 检索方式 ${s.defaultMode}（向量权重 ${s.hybridWVector}）`;
+        } catch (e) {
+            $('stats').textContent = '后端未连接';
+        }
+    })();
+
+    // ---------------- 示例问题 ----------------
+    const EXAMPLES = [
+        '转专业需要满足什么条件？',
+        '学生证丢了怎么补办？',
+        '旷课多少学时会被处分？',
+        '违纪处分有哪几种？',
+        '学业证书有哪些？',
+        '提前毕业需要什么条件？',
+        '辅修专业怎么申请？',
+        '留校察看多少个月？'
+    ];
+    EXAMPLES.forEach(q => {
+        const el = document.createElement('span');
+        el.className = 'chip';
+        el.textContent = q;
+        el.onclick = () => { $('q').value = q; ask(); };
+        $('examples').appendChild(el);
+    });
+
+    // ---------------- 问答 ----------------
+    let asking = false;
+
+    async function ask() {
+        const question = $('q').value.trim();
+        if (!question || asking) return;
+
+        asking = true;
+        $('askBtn').disabled = true;
+        $('askBtn').textContent = '思考中…';
+        $('qaResult').style.display = 'block';
+        $('qaMeta').innerHTML = '<span class="loading">检索中，请稍等（首次调用模型约 1~2 秒）…</span>';
+        $('answer').textContent = '';
+        $('refs').innerHTML = '';
+        $('refsTitle').style.display = 'none';
+
+        try {
+            const d = await postJson('/api/qa', { question: question, topK: 3 });
+
+            // 顶部信息：模型、耗时、检索置信度、是否被拒答、引用校验结果
+            const citeBadge = d.citationOk
+                ? '<span class="badge ok">引用合法</span>'
+                : '<span class="badge warn">引用需人工核对</span>';
+            const invalid = (d.invalidCitations && d.invalidCitations.length)
+                ? ` · 编造编号 ${esc(d.invalidCitations.join(','))}` : '';
+            // 拒答标记：检索置信度不够时后端直接拦掉，不调大模型，省钱又快
+            const gateBadge = d.gated
+                ? '<span class="badge err">置信度不足 · 已拒答</span>'
+                : '<span class="badge ok">基于资料作答</span>';
+            // 接地校验：回答里的硬事实能否在被引用的原文里找到（后端 AnswerGuard 逐条核过）
+            // factCount=0 表示这段回答里没有数字/时间/处分名这类可核对的事实，如实说明"没核到"
+            let groundBadge;
+            if (d.factCount === 0) {
+                groundBadge = '<span class="badge warn" title="这段回答里没有可核对的事实">无可核对事实</span>';
+            } else if (d.grounded) {
+                groundBadge = `<span class="badge ok">${d.factCount} 个事实已核对</span>`;
+            } else {
+                const list = (d.missingFacts || []).map(esc).join('、');
+                groundBadge = `<span class="badge warn" title="${list}">${d.missingFacts.length} 个事实与原文不符</span>`;
+            }
+            $('qaMeta').innerHTML =
+                `<span>模型 ${esc(d.model)}</span>` +
+                `<span>耗时 ${d.elapsedMs} ms</span>` +
+                `<span>检索 ${d.retrievedCount} 块</span>` +
+                `<span>最高相关度 ${d.topScore}</span>` +
+                `<span>${gateBadge}</span>` +
+                `<span>${citeBadge}${invalid}</span>` +
+                `<span>${groundBadge}</span>`;
+
+            // 答案：把 [1] 变成可点击的上标
+            renderAnswer(d.answer);
+
+            // 引用卡片
+            const refs = d.references || [];
+            if (refs.length) {
+                $('refsTitle').style.display = 'block';
+                refs.forEach(r => $('refs').appendChild(buildRefCard(r)));
+            }
+        } catch (e) {
+            $('qaMeta').innerHTML = '';
+            $('answer').innerHTML = `<div class="errbox">出错了：${esc(e.message)}</div>`;
+        } finally {
+            asking = false;
+            $('askBtn').disabled = false;
+            $('askBtn').textContent = '提问';
+        }
+    }
+
+    function renderAnswer(text) {
+        // 先整体转义（模型输出不可信，绝对不能直接当 HTML 插进页面）
+        const escaped = esc(text);
+        // 再把 [n] 换成可点击的上标；只认 1~9，避免误伤普通方括号内容
+        const withCite = escaped.replace(/\[(\d{1,2})\]/g,
+            (m, n) => `<sup class="cite" data-n="${n}">${n}</sup>`);
+        $('answer').innerHTML = withCite;
+
+        $('answer').querySelectorAll('.cite').forEach(el => {
+            el.onclick = () => {
+                const card = document.querySelector(`.ref[data-n="${el.dataset.n}"]`);
+                if (!card) return;
+                card.classList.add('highlight');
+                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setTimeout(() => card.classList.remove('highlight'), 1600);
+            };
+        });
+    }
+
+    function buildRefCard(r) {
+        const div = document.createElement('div');
+        div.className = 'ref';
+        div.dataset.n = r.index;
+        div.innerHTML =
+            `<div class="ref-head">
+                <span class="ref-no">${r.index}</span>
+                <span class="ref-title">${esc(r.documentTitle)}</span>
+                <span class="ref-info">第 ${r.chunkIndex + 1} 块 · 相似度 ${r.score} · chunkId ${r.chunkId}</span>
+             </div>
+             <div class="ref-body" title="点一下展开/收起">${esc(r.content)}</div>`;
+        const body = div.querySelector('.ref-body');
+        body.onclick = () => body.classList.toggle('expanded');
+        return div;
+    }
+
+    $('askBtn').onclick = ask;
+    $('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+
+    // ---------------- 检索对比 ----------------
+    async function compare() {
+        const question = $('cq').value.trim();
+        if (!question) return;
+        $('cmpBtn').disabled = true;
+        $('cmpGrid').innerHTML = '<div class="empty">检索中…</div>';
+
+        try {
+            const d = await getJson('/api/search/compare?q=' + encodeURIComponent(question) + '&topK=3');
+            $('cmpGrid').innerHTML = '';
+            (d.modes || []).forEach(m => {
+                const col = document.createElement('div');
+                col.className = 'col';
+                col.innerHTML = `<h4>${esc(m.modeLabel)} <span class="score">${m.mode}</span></h4>`;
+                (m.hits || []).forEach((h, i) => {
+                    const hit = document.createElement('div');
+                    hit.className = 'hit';
+                    hit.innerHTML =
+                        `<div><b>${i + 1}.</b> ${esc(h.documentTitle)} <span class="score">第 ${h.chunkIndex + 1} 块 · ${h.score}</span></div>
+                         <span class="txt">${esc((h.content || '').slice(0, 60))}…</span>`;
+                    col.appendChild(hit);
+                });
+                $('cmpGrid').appendChild(col);
+            });
+        } catch (e) {
+            $('cmpGrid').innerHTML = `<div class="empty errbox">出错了：${esc(e.message)}</div>`;
+        } finally {
+            $('cmpBtn').disabled = false;
+        }
+    }
+
+    $('cmpBtn').onclick = compare;
+    $('cq').addEventListener('keydown', e => { if (e.key === 'Enter') compare(); });
+
+    // ---------------- 评测看板 ----------------
+    async function runEval() {
+        const btn = $('evalBtn');
+        btn.disabled = true;
+        btn.textContent = '正在评测…';
+        $('evalResult').style.display = 'block';
+        $('evalMeta').innerHTML = '<span class="loading">跑 36 道题，约 25 秒…</span>';
+        $('evalTable').querySelector('thead').innerHTML = '';
+        $('evalTable').querySelector('tbody').innerHTML = '';
+
+        try {
+            const d = await getJson('/api/eval/run?topK=3');
+            $('evalMeta').innerHTML =
+                `<span>有效题 ${d.questionCount} 道</span>` +
+                `<span>另有 ${d.skippedNoAnswer} 道"库内无答案"题不计入</span>` +
+                `<span>索引 ${d.chunkTotal} 块</span>` +
+                `<span>耗时 ${d.elapsedMs} ms</span>` +
+                `<span>Top-K = ${d.topK}</span>`;
+
+            const thead = $('evalTable').querySelector('thead');
+            thead.innerHTML = `<tr style="text-align:left;color:#6b7280">
+                    <th style="padding:8px 6px">检索配置</th>
+                    <th style="padding:8px 6px">命中</th>
+                    <th style="padding:8px 6px">Recall@3</th>
+                    <th style="padding:8px 6px">MRR</th>
+                </tr>`;
+            const tbody = $('evalTable').querySelector('tbody');
+            (d.variants || []).forEach(v => {
+                const tr = document.createElement('tr');
+                // 把最好的那行标绿色，一眼能看出结论
+                const isBest = Math.abs(v.recall - Math.max(...d.variants.map(x => x.recall))) < 1e-9;
+                tr.style.borderTop = '1px solid #e5e7eb';
+                if (isBest) tr.style.background = '#ecfdf5';
+                tr.innerHTML =
+                    `<td style="padding:8px 6px">${esc(v.label)} <span style="color:#9ca3af;font-size:12px">${esc(v.code)}</span></td>
+                     <td style="padding:8px 6px">${v.hits}/${v.questionCount}</td>
+                     <td style="padding:8px 6px"><b>${(v.recall * 100).toFixed(2)}%</b></td>
+                     <td style="padding:8px 6px">${v.mrr.toFixed(4)}</td>`;
+                tbody.appendChild(tr);
+            });
+        } catch (e) {
+            $('evalMeta').innerHTML = '';
+            $('evalTable').querySelector('tbody').innerHTML =
+                `<tr><td class="errbox">出错了：${esc(e.message)}</td></tr>`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '跑一遍评测';
+        }
+    }
+
+    $('evalBtn').onclick = runEval;
+</script>
+</body>
+</html>

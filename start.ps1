@@ -1,156 +1,177 @@
 ﻿<#
 .SYNOPSIS
-    一键启动校园 RAG 问答系统（演示 / 新机器复现用）。
+    校园规章制度 RAG 智能问答系统 —— 一键构建并启动（单 jar：后端接口 + 前端页面同源）。
 
 .DESCRIPTION
-    做四件事：
-      1. 检查 MySQL 能不能连
-      2. 建库建表（可重复执行，schema.sql 里都是 IF NOT EXISTS）
-      3. 后台启动 Spring Boot，等 /api/health 变成 UP
-      4. 如果库里还没有文档，批量导入语料并向量化（失败的文件自动删掉，不污染库）
-
-.PARAMETER MysqlPassword
-    MySQL root 密码，默认 123456（按自己机器改）
+    做三件事：
+      1) 构建前端（npm run build）并把产物拷进后端的 static 目录；
+      2) 用 Maven 打成可执行 jar；
+      3) 启动 jar 并轮询 /api/health，就绪后打印访问地址与演示账号。
 
 .PARAMETER Port
-    服务端口，默认 8081
+    端口，默认 8081。
 
-.PARAMETER Reset
-    清空 kb_chunk / kb_document 后重新导入（做演示前想回到干净状态时用）
+.PARAMETER SkipBuild
+    跳过前端构建与 jar 打包，直接启动已有的 jar（改完后端小改动时用）。
+
+.PARAMETER Stop
+    停掉本脚本启动的实例（按端口找进程）。
 
 .EXAMPLE
     .\start.ps1
-    .\start.ps1 -Reset
-    .\start.ps1 -MysqlPassword 你的密码 -Port 8090
+    .\start.ps1 -Port 8090
+    .\start.ps1 -SkipBuild
+    .\start.ps1 -Stop
 #>
 param(
-    [string]$MysqlPassword = '123456',
     [int]$Port = 8081,
-    [switch]$Reset
+    [switch]$SkipBuild,
+    [switch]$Stop
 )
 
-$ErrorActionPreference = 'Stop'
+# 注意：这里不用 'Stop'。npm / mvn / java -version 这些原生命令会把警告写到 stderr，
+# 在 Stop 模式下会被当成"终止性错误"直接打断脚本。改为 Continue + 自己检查 $LASTEXITCODE。
+$ErrorActionPreference = 'Continue'
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$jar = Join-Path $root 'demo\target\campus-rag-0.1.0-SNAPSHOT.jar'
+$logFile = Join-Path $root 'logs\app.log'
 
-# ---------- 路径与工具 ----------
-$root  = Split-Path -Parent $PSCommandPath
-$demo  = Join-Path $root 'demo'
-$mysql = 'E:\cal\MySQL\MySQL Server 8.0\bin\mysql.exe'
-$jdk   = 'E:\cal\code\jdk21'
-$base  = "http://localhost:$Port"
-$log   = Join-Path $env:TEMP 'campus-demo.log'
+function Write-Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
+function Write-Ok($text) { Write-Host "    $text" -ForegroundColor Green }
+function Write-Warn2($text) { Write-Host "    $text" -ForegroundColor Yellow }
 
-# Maven 要用 JDK 21（本机 PATH 里默认是 Java 8）
-if (Test-Path $jdk) {
-    $env:JAVA_HOME = $jdk
-    $env:PATH = (Join-Path $jdk 'bin') + ';' + $env:PATH
-}
-
-function Step($n, $text) {
-    Write-Host ""
-    Write-Host "== [$n] $text" -ForegroundColor Cyan
-}
-function Ok($text)   { Write-Host "   OK  $text" -ForegroundColor Green }
-function Warn($text) { Write-Host "   ...  $text" -ForegroundColor Yellow }
-
-# ---------- 1. MySQL ----------
-Step '1/5' '检查 MySQL'
-if (-not (Test-Path $mysql)) { throw "找不到 mysql.exe：$mysql（改脚本里的 `$mysql 变量）" }
-$env:MYSQL_PWD = $MysqlPassword
-$ver = & $mysql -h 127.0.0.1 -P 3306 -u root -N -B -e "SELECT VERSION();" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "MySQL 连接失败（密码错了或服务没起）：`n$ver"
-}
-Ok "MySQL $ver 连接正常"
-
-# ---------- 2. 建库建表 ----------
-Step '2/5' '建库建表'
-$schema = Join-Path $demo 'src\main\resources\db\schema.sql'
-if (-not (Test-Path $schema)) { throw "找不到 schema.sql：$schema" }
-# 用 cmd 做输入重定向，保证 UTF-8 中文注释不被 PowerShell 破坏
-cmd /c "`"$mysql`" -h 127.0.0.1 -P 3306 -u root --default-character-set=utf8mb4 < `"$schema`"" | Out-Null
-Ok '表结构已就绪'
-
-if ($Reset) {
-    Warn 'Reset：清空 kb_chunk / kb_document'
-    & $mysql -h 127.0.0.1 -P 3306 -u root --default-character-set=utf8mb4 -B campus_rag `
-        -e "DELETE FROM kb_chunk; DELETE FROM kb_document;" | Out-Null
-    Ok '已清空'
-}
-
-# ---------- 3. 启动服务 ----------
-Step '3/5' "启动 Spring Boot（端口 $Port）"
-$listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($listening) {
-    Warn "端口 $Port 已在监听，跳过启动（想重启先手动关掉旧实例）"
-} else {
-    $cmdline = "cd /d `"$demo`" && mvn -q -DskipTests spring-boot:run -Dspring-boot.run.arguments=--server.port=$Port > `"$log`" 2>&1"
-    Start-Process -FilePath 'cmd' -ArgumentList '/c', $cmdline -WindowStyle Hidden
-    Ok "已后台启动，日志：$log"
-}
-
-# ---------- 4. 等健康检查 ----------
-Step '4/5' '等待服务就绪（首次编译约 20~40 秒）'
-$ready = $false
-for ($i = 0; $i -lt 90; $i++) {
-    Start-Sleep -Seconds 2
-    try {
-        $h = Invoke-RestMethod -Uri "$base/api/health" -TimeoutSec 2
-        if ($h.code -eq 0) { $ready = $true; break }
-    } catch { }
-    if ($i % 5 -eq 4) { Warn "还在启动… 已等 $(($i + 1) * 2) 秒" }
-}
-if (-not $ready) { throw "服务 180 秒内没起来，看日志：$log" }
-Ok "服务已就绪：$base"
-
-# ---------- 5. 导入语料（只在库里没文档时做） ----------
-Step '5/5' '检查并导入语料'
-$docCount = (& $mysql -h 127.0.0.1 -P 3306 -u root -N -B campus_rag -e "SELECT COUNT(*) FROM kb_document;").Trim()
-$chunkCount = (& $mysql -h 127.0.0.1 -P 3306 -u root -N -B campus_rag -e "SELECT COUNT(*) FROM kb_chunk;").Trim()
-Write-Host "   当前：${docCount} 份文档 / ${chunkCount} 个块"
-
-if ([int]$docCount -gt 0 -and -not $Reset) {
-    Warn '库里已有数据，跳过导入（想重建：.\start.ps1 -Reset）'
-} else {
-    # 语料：OCR 出来的 txt（去重）+ 原生文本 PDF（扫描件会在后端失败，随即删除）
-    $files = @()
-    $files += Get-ChildItem (Join-Path $root 'docs-src-ocr') -Recurse -Filter *.txt -ErrorAction SilentlyContinue |
-        Group-Object Name | ForEach-Object { $_.Group[0] }
-    $files += Get-ChildItem (Join-Path $root 'docs-src') -Recurse -Filter *.pdf -ErrorAction SilentlyContinue
-    Write-Host "   待导入 $($files.Count) 个文件"
-
-    $okCount = 0; $skip = 0; $n = 0
-    foreach ($f in $files) {
-        $n++
-        Write-Host ("   [{0}/{1}] {2}" -f $n, $files.Count, $f.Name) -NoNewline
-        $respFile = Join-Path $env:TEMP 'campus-upload.json'
-        & curl.exe -s -o $respFile -F "file=@$($f.FullName)" "$base/api/document/upload" | Out-Null
-        $json = Get-Content $respFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($json.status -eq 2 -and $json.chunkCount -gt 0) {
-            Write-Host "  -> $($json.chunkCount) 块" -ForegroundColor Green
-            $okCount++
-        } else {
-            Write-Host "  -> 跳过（扫描件/解析失败），已删除该记录" -ForegroundColor Yellow
-            if ($json.id) {
-                & curl.exe -s -X DELETE "$base/api/document/$($json.id)" | Out-Null
-            }
-            $skip++
-        }
+# ---------- 停掉实例 ----------
+if ($Stop) {
+    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if (-not $conn) {
+        Write-Warn2 "端口 $Port 上没有正在监听的进程"
+        return
     }
-    Ok "导入完成：成功 $okCount 份，跳过 $skip 份"
-
-    Write-Host "   正在向量化（每批 16 条，约 6~10 秒）…" -NoNewline
-    $embFile = Join-Path $env:TEMP 'campus-embed.json'
-    & curl.exe -s -o $embFile "$base/api/dev/embed-all?maxChunks=5000" | Out-Null
-    $emb = Get-Content $embFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    Write-Host ("  完成：{0} 条向量 / {1} ms" -f $emb.embeddedThisRun, $emb.elapsedMs) -ForegroundColor Green
+    $conn | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+    Write-Ok "已停止占用 $Port 的进程（PID: $($conn.OwningProcess -join ', ')）"
+    return
 }
 
-# ---------- 收尾 ----------
+# ---------- 环境检查 ----------
+Write-Step '检查环境'
+
+$javaExe = $null
+foreach ($candidate in @(
+        'E:\cal\code\jdk21\bin\java.exe',
+        "$env:JAVA_HOME\bin\java.exe"
+    )) {
+    if ($candidate -and (Test-Path $candidate)) { $javaExe = $candidate; break }
+}
+if (-not $javaExe) {
+    $cmd = Get-Command java -ErrorAction SilentlyContinue
+    if ($cmd) { $javaExe = $cmd.Source }
+}
+if (-not $javaExe) {
+    throw ' 找不到 java.exe：请安装 JDK 21，或把 JAVA_HOME 指到 JDK 21'
+}
+$javaVersion = cmd /c "`"$javaExe`" -version 2>&1" | Select-Object -First 1
+Write-Ok "java: $javaExe"
+Write-Ok $javaVersion.Trim()
+if ($javaVersion -notmatch '21|22|23|24') {
+    Write-Warn2 '注意：项目要求 JDK 21+，当前版本可能编译不过（record/pattern matching 会用不到）'
+}
+
+$mysqlExe = 'E:\cal\MySQL\MySQL Server 8.0\bin\mysql.exe'
+if (Test-Path $mysqlExe) { Write-Ok "mysql client: $mysqlExe" }
+else { Write-Warn2 ' 没找到 mysql 客户端，跳过数据库连通性检查（应用启动时如果连不上会自己报错）' }
+
+if (-not (Test-Path $logFile)) { New-Item -ItemType Directory -Force -Path (Split-Path $logFile) | Out-Null }
+
+# ---------- 构建 ----------
+if (-not $SkipBuild) {
+    Write-Step '构建前端（Vue 3 + Vite）'
+    Push-Location (Join-Path $root 'frontend')
+    try {
+        if (-not (Test-Path 'node_modules')) {
+            Write-Ok '首次运行，安装前端依赖（npm install）…'
+            & npm install
+            if ($LASTEXITCODE -ne 0) { throw 'npm install 失败' }
+        }
+        & npm run build
+        if ($LASTEXITCODE -ne 0) { throw 'npm run build 失败' }
+    }
+    finally { Pop-Location }
+
+    Write-Step '把前端产物拷进后端 static（让一个 jar 同时提供页面和接口）'
+    $staticDir = Join-Path $root 'demo\src\main\resources\static'
+    $distDir = Join-Path $root 'frontend\dist'
+    if (-not (Test-Path $distDir)) { throw " 没找到 $distDir，前端构建可能没成功" }
+    if ((Test-Path (Join-Path $staticDir 'index.html')) -and -not (Test-Path (Join-Path $staticDir 'legacy-debug.html'))) {
+        Move-Item (Join-Path $staticDir 'index.html') (Join-Path $staticDir 'legacy-debug.html')
+    }
+    Remove-Item -Recurse -Force (Join-Path $staticDir 'assets') -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $distDir 'index.html') $staticDir -Force
+    Copy-Item -Recurse (Join-Path $distDir 'assets') $staticDir -Force
+    Write-Ok 'static/ 已更新'
+
+    Write-Step '打包可执行 jar（mvn package -DskipTests）'
+    Push-Location (Join-Path $root 'demo')
+    try {
+        $env:JAVA_HOME = Split-Path (Split-Path $javaExe -Parent) -Parent
+        $env:PATH = (Split-Path $javaExe -Parent) + ';' + $env:PATH
+        & mvn -o -q -DskipTests package
+        if ($LASTEXITCODE -ne 0) { throw 'mvn package 失败（先跑一次不带 -o 的 mvn 让依赖下载完）' }
+    }
+    finally { Pop-Location }
+}
+else {
+    Write-Step '跳过构建（-SkipBuild）'
+}
+
+if (-not (Test-Path $jar)) {
+    throw " 没找到 jar：$jar`n     先执行 .\start.ps1（不带 -SkipBuild）打一次包"
+}
+Write-Ok "jar: $jar ($([math]::Round((Get-Item $jar).Length / 1MB, 1)) MB)"
+
+# ---------- 启动 ----------
+Write-Step "启动服务（端口 $Port）"
+$existing = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Warn2 "端口 $Port 已被 PID $($existing.OwningProcess -join ',') 占用，先执行 .\start.ps1 -Stop -Port $Port"
+    throw " 端口占用"
+}
+
+# 用 cmd 的 start /b 启动：java 进程不继承当前 PowerShell 的 stdout/stderr 句柄。
+# 用 Start-Process -RedirectStandardOutput 的写法在这里会出问题——子进程一直握着句柄，
+# 调用方（尤其是 CI / 管道）永远等不到脚本退出。
+$launch = 'start "" /b "' + $javaExe + '" -jar "' + $jar + '" --server.port=' + $Port +
+    ' > "' + $logFile + '" 2>&1'
+cmd /c $launch
+Write-Ok "已启动（后台），日志 $logFile"
+
+$health = $null
+for ($i = 1; $i -le 60; $i++) {
+    Start-Sleep -Milliseconds 1000
+    try {
+        $health = Invoke-RestMethod -Uri "http://localhost:$Port/api/health" -TimeoutSec 2
+        if ($health.status -eq 'UP') { break }
+    }
+    catch { $health = $null }
+}
+if (-not $health) {
+    Write-Warn2 "60 秒内没等到 /api/health 就绪，最后 20 行日志："
+    Get-Content $logFile -Tail 20 -ErrorAction SilentlyContinue
+    throw ' 启动失败'
+}
+
+Write-Step '就绪'
+$listen = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($listen) {
+    $pidDir = Join-Path $root 'logs'
+    if (-not (Test-Path $pidDir)) { New-Item -ItemType Directory -Force -Path $pidDir | Out-Null }
+    $pidFile = Join-Path $pidDir 'app.pid'
+    Set-Content -Path $pidFile -Value $listen.OwningProcess -Encoding ASCII
+    Write-Ok "进程 PID：$($listen.OwningProcess)（已写入 logs/app.pid）"
+}
+Write-Ok "应用：$($health.appName)   Java：$($health.javaVersion)"
 Write-Host ""
-Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host " 打开浏览器访问：$base" -ForegroundColor White
-Write-Host "   - 智能问答：问「转专业需要满足什么条件」" -ForegroundColor Gray
-Write-Host "   - 拒答演示：问「食堂几点开门」（库里没有）" -ForegroundColor Gray
-Write-Host "   - 检索对比：看五种检索方式的排名差异" -ForegroundColor Gray
-Write-Host "   - 评测看板：点一下跑 36 道题" -ForegroundColor Gray
-Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "  页面（浏览器打开）：  http://localhost:$Port/" -ForegroundColor White
+Write-Host "  健康检查：            http://localhost:$Port/api/health" -ForegroundColor White
+Write-Host "  演示账号：            admin / admin123（管理员）   student / student123（学生）" -ForegroundColor White
+Write-Host ""
+Write-Host "  停止：.\start.ps1 -Stop -Port $Port" -ForegroundColor DarkGray
