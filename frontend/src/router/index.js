@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import HealthView from '../views/HealthView.vue'
 import QaView from '../views/QaView.vue'
+import DocView from '../views/DocView.vue'
 import Placeholder from '../views/Placeholder.vue'
 
 /**
@@ -26,8 +27,8 @@ const routes = [
   {
     path: '/documents',
     name: 'documents',
-    component: Placeholder,
-    meta: { title: '文档管理', todo: '第 3 步：上传 / 状态机 / 重新切分 / 块预览 / 删除' }
+    component: DocView,
+    meta: { title: '文档管理' }
   },
   {
     path: '/debug',
