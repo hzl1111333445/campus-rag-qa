@@ -54,8 +54,12 @@ public class EvalService {
         this.testsetPath = testsetPath;
     }
 
-    /** 一道评测题 */
-    public record Question(int id, String text, List<String> keywords, String type, int difficulty) {
+    /** 一道评测题
+     *
+     * @param split 划分：dev=调参用（可以改切分/权重再看效果），test=只用来报最终数字，不参与调参
+     */
+    public record Question(int id, String text, List<String> keywords, String type, int difficulty,
+                           String split) {
     }
 
     /** 一种题型下的统计 */
@@ -66,10 +70,14 @@ public class EvalService {
     public record Miss(int questionId, String question, int rank) {
     }
 
-    /** 一种检索配置的成绩 */
+    /** 一种检索配置的成绩
+     *
+     * @param byType  按题型拆解
+     * @param bySplit 按划分（dev / test）拆解——test 那一列才是能写进论文的"最终数字"
+     */
     public record VariantStat(String code, String label, int questionCount, int hits,
                               double recall, double mrr, Map<String, TypeStat> byType,
-                              List<Miss> misses) {
+                              Map<String, TypeStat> bySplit, List<Miss> misses) {
     }
 
     /** 整轮评测报告 */
@@ -106,6 +114,11 @@ public class EvalService {
         for (int v = 0; v < variants.size(); v++) {
             byTypeAcc.add(new LinkedHashMap<>());
         }
+        // 划分累计：dev / test -> [题数, 命中数, MRR 分子]（每个配置一份）
+        List<Map<String, double[]>> bySplitAcc = new ArrayList<>();
+        for (int v = 0; v < variants.size(); v++) {
+            bySplitAcc.add(new LinkedHashMap<>());
+        }
 
         long begin = System.currentTimeMillis();
 
@@ -138,6 +151,13 @@ public class EvalService {
                     cell[1] += 1;
                     cell[2] += 1.0 / firstRank;
                 }
+                Map<String, double[]> sacc = bySplitAcc.get(v);
+                double[] scell = sacc.computeIfAbsent(q.split(), k -> new double[3]);
+                scell[0] += 1;
+                if (firstRank > 0) {
+                    scell[1] += 1;
+                    scell[2] += 1.0 / firstRank;
+                }
             }
         }
 
@@ -152,6 +172,14 @@ public class EvalService {
                 int count = (int) c[0];
                 int hits = (int) c[1];
                 byType.put(e.getKey(), new TypeStat(count, hits,
+                        round4(hits / (double) count), round4(c[2] / count)));
+            }
+            Map<String, TypeStat> bySplit = new LinkedHashMap<>();
+            for (Map.Entry<String, double[]> e : bySplitAcc.get(v).entrySet()) {
+                double[] c = e.getValue();
+                int count = (int) c[0];
+                int hits = (int) c[1];
+                bySplit.put(e.getKey(), new TypeStat(count, hits,
                         round4(hits / (double) count), round4(c[2] / count)));
             }
             List<Miss> misses = new ArrayList<>();
@@ -170,6 +198,7 @@ public class EvalService {
                     round4(hitCount[v] / (double) n),
                     round4(mrrSum[v] / n),
                     byType,
+                    bySplit,
                     misses));
         }
 
@@ -216,7 +245,7 @@ public class EvalService {
                 }
                 String[] p = line.split("\t");
                 if (p.length < 5) {
-                    throw new IllegalStateException("题集格式不对（要 5 列，用 TAB 分隔）：" + line);
+                    throw new IllegalStateException("题集格式不对（至少要 5 列，用 TAB 分隔）：" + line);
                 }
                 List<String> kws = new ArrayList<>();
                 for (String k : p[2].split("\\|")) {
@@ -224,8 +253,10 @@ public class EvalService {
                         kws.add(k.trim());
                     }
                 }
+                // 第 6 列是划分（dev / test），旧题集没有这列时默认按 dev 处理
+                String split = p.length >= 6 && !p[5].isBlank() ? p[5].trim() : "dev";
                 out.add(new Question(Integer.parseInt(p[0].trim()), p[1].trim(), kws,
-                        p[3].trim(), Integer.parseInt(p[4].trim())));
+                        p[3].trim(), Integer.parseInt(p[4].trim()), split));
             }
         } catch (IOException e) {
             throw new IllegalStateException("读题集失败：" + e.getMessage(), e);
