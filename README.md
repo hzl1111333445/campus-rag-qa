@@ -104,9 +104,15 @@ campus:
   embedding: { api-key: sk-xxx }          # 硅基流动
   rerank:    { api-key: sk-xxx, enabled: true }
   auth:      { secret: change-me-please } # 换掉它 = 所有旧令牌立即失效
+
+# 数据库密码同样不进 Git（application.yml 里是 ${DB_PASSWORD:}，默认空密码）
+spring:
+  datasource:
+    username: root
+    password: "你的 MySQL 密码"
 ```
 
-也可以全部用环境变量覆盖：`DEEPSEEK_API_KEY`、`EMBEDDING_API_KEY`、`RERANK_API_KEY`、`AUTH_SECRET`。
+也可以全部用环境变量覆盖：`DEEPSEEK_API_KEY`、`EMBEDDING_API_KEY`、`RERANK_API_KEY`、`AUTH_SECRET`、`DB_USERNAME`、`DB_PASSWORD`（以及 `DB_URL`）。
 想复现"线上链路"（精排 + 查询改写），还要打开两个开关：`RERANK_ENABLED=true`、`REWRITE_ENABLED=true`。
 
 ### 4. 启动后端
