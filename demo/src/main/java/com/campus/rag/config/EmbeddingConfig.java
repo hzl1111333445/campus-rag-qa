@@ -1,7 +1,10 @@
 package com.campus.rag.config;
 
+import com.campus.rag.service.CacheService;
+import com.campus.rag.service.CachedEmbeddingClient;
 import com.campus.rag.service.EmbeddingClient;
 import com.campus.rag.service.OpenAiEmbeddingClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -23,8 +26,21 @@ public class EmbeddingConfig {
 
     private static final Logger log = LoggerFactory.getLogger(EmbeddingConfig.class);
 
+    /**
+     * 真正的客户端在这层里面构造，外面统一套一层 {@link CachedEmbeddingClient}。
+     *
+     * <p>为什么要套：检索时每次提问都要把问题向量化（一次 HTTP 往返，150~300ms），
+     * 而同一个问题的向量是完全确定的，缓存起来第二次就能省掉这一步。
+     * 套在 Bean 上，入库的批量路径也自动享受同样的缓存，不用改两处。
+     */
     @Bean
-    public EmbeddingClient embeddingClient(EmbeddingProperties props) {
+    public EmbeddingClient embeddingClient(EmbeddingProperties props,
+                                          CacheService cacheService,
+                                          ObjectMapper objectMapper) {
+        return new CachedEmbeddingClient(buildDelegate(props), cacheService, objectMapper);
+    }
+
+    private EmbeddingClient buildDelegate(EmbeddingProperties props) {
         String provider = props.getProvider() == null ? "" : props.getProvider().trim();
         if ("openai".equalsIgnoreCase(provider)) {
             if (props.getApiKey() == null || props.getApiKey().isBlank()) {

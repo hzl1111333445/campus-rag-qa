@@ -2,6 +2,7 @@ package com.campus.rag.config;
 
 import com.campus.rag.service.AuthException;
 import com.campus.rag.service.ForbiddenException;
+import com.campus.rag.service.RateLimitException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -45,6 +46,22 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException e) {
         return ResponseEntity.badRequest().body(body(400, e.getMessage()));
+    }
+
+    /**
+     * 触发限流 → 429，并带 {@code Retry-After} 头。
+     *
+     * <p>为什么必须是 429 而不是 400 或 503：429 Too Many Requests 是标准语义，
+     * 客户端（和网关）看到它就知道"该退避重试"，而不是"改参数"或"服务挂了"。
+     */
+    @ExceptionHandler(RateLimitException.class)
+    public ResponseEntity<Map<String, Object>> handleRateLimit(RateLimitException e) {
+        Map<String, Object> body = body(429, e.getMessage());
+        body.put("limit", e.limit());
+        body.put("retryAfterSeconds", e.retryAfterSeconds());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("Retry-After", String.valueOf(e.retryAfterSeconds()))
+                .body(body);
     }
 
     /**
