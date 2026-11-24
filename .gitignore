@@ -40,3 +40,21 @@ _commitmsg.txt
 docs/简历/
 docs-src-web/
 docs-src-manual/
+
+# 个人记录与过程文档不公开（本地保留）
+docs/00-*.md
+docs/03-进度与下次开工点.md
+docs/04-工作日志.md
+docs/18-*.md
+docs/19-*.md
+docs/20-*.md
+docs/21-*.md
+docs/21-*.docx
+docs/21-*.pdf
+docs/22-*.md
+docs/22-*.docx
+docs/22-*.pdf
+docs/23-*.md
+docs/23-*.docx
+docs/23-*.pdf
+docs/24-*.md
