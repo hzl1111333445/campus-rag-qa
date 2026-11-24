@@ -38,6 +38,7 @@ public class QaService {
     private final LlmProperties llmProperties;
     private final QueryRewriter queryRewriter;
     private final ObjectMapper objectMapper;
+    private final CacheService cacheService;
 
     /**
      * 追问补全的触发阈值：按原句检索的最高分低于它，才认为"这句话自己检索不明白"，
@@ -52,7 +53,8 @@ public class QaService {
                      LlmProperties llmProperties,
                      QueryRewriter queryRewriter,
                      @Value("${campus.context.followup-trigger-score:0.30}") double followupTriggerScore,
-                     ObjectMapper objectMapper) {
+                     ObjectMapper objectMapper,
+                     CacheService cacheService) {
         this.retrievalService = retrievalService;
         this.promptBuilder = promptBuilder;
         this.chatClient = chatClient;
@@ -60,6 +62,7 @@ public class QaService {
         this.queryRewriter = queryRewriter;
         this.followupTriggerScore = followupTriggerScore;
         this.objectMapper = objectMapper;
+        this.cacheService = cacheService;
     }
 
     /**
@@ -105,7 +108,9 @@ public class QaService {
                            boolean gated,
                            int evidenceCount,
                            String standaloneQuestion,
-                           long elapsedMs) {
+                           long elapsedMs,
+                           /** 是否来自缓存（true 时 elapsedMs 只包含查缓存的时间） */
+                           boolean cached) {
     }
 
     /**
@@ -132,6 +137,16 @@ public class QaService {
         if (history != null && !history.isEmpty()) {
             log.info("多轮：携带 {} 条历史（只用于理解指代）：{}",
                     history.size(), ContextAssembler.describe(history));
+        }
+
+        // ---------- 第 -1 步：查缓存（只对"没有历史"的问题生效）----------
+        // 为什么有历史就不查：同一句话在不同上下文里意思不同（"那要怎么申请"），
+        // 键里塞不下整段历史，塞了也几乎不可能命中，不如不查。
+        if (history == null || history.isEmpty()) {
+            QaAnswer cached = fromCache(question, topK, begin);
+            if (cached != null) {
+                return cached;
+            }
         }
 
         Prepared prepared = prepare(question, topK, history, begin);
@@ -161,7 +176,11 @@ public class QaService {
         }
 
         Validated validated = validate(answer, hits);
-        return build(question, answer, hits, prepared, validated, evidenceCount, begin);
+        QaAnswer result = build(question, answer, hits, prepared, validated, evidenceCount, begin);
+        if (history == null || history.isEmpty()) {
+            putCache(question, topK, result);
+        }
+        return result;
     }
 
     /**
@@ -206,7 +225,81 @@ public class QaService {
         return build(question, answer, hits, prepared, validated, 0, begin);
     }
 
+    // ======================= 缓存 =======================
+
+    /**
+     * 缓存的键：问题 + topK + 索引指纹 + 模型名 + 提示词版本，全部进哈希。
+     *
+     * <p>少任何一项都会出现"改了配置还返回旧答案"的诡异现象——
+     * 而那种 bug 极难发现（看起来一切正常，只是答案对不上资料）。
+     */
+    private String cacheKey(String question, int topK) {
+        String fingerprint = null;
+        try {
+            Object fp = retrievalService.bm25Stats().get("fingerprint");
+            fingerprint = fp == null ? null : fp.toString();
+        } catch (Exception e) {
+            log.warn("取索引指纹失败，本次不读写缓存：{}", e.getMessage());
+            return null;
+        }
+        return CacheKeys.qa(question, topK, fingerprint, chatClient.model());
+    }
+
+    /**
+     * 读缓存。
+     *
+     * <p><b>只接受三类"值得缓存"的答案</b>：没被拒答、引用编号没造假、硬事实能对上原文。
+     * 拒答结果缓存了会掩盖"语料补好了但用户还在看到旧拒答"；校验没通过的答案缓存了
+     * 等于把错误固化一小时。
+     */
+    private QaAnswer fromCache(String question, int topK, long begin) {
+        if (!cacheService.enabled()) {
+            return null;
+        }
+        String key = cacheKey(question, topK);
+        if (key == null) {
+            return null;
+        }
+        String json = cacheService.get(key);
+        if (json == null) {
+            return null;
+        }
+        try {
+            QaAnswer cached = objectMapper.readValue(json, QaAnswer.class);
+            long cost = System.currentTimeMillis() - begin;
+            log.info("缓存命中：{}（{} ms，原答案 {} ms）", key.substring(0, 26), cost, cached.elapsedMs());
+            // elapsedMs 换成"这次实际花的时间"，否则前端会显示上一次的耗时，看起来像没生效
+            return new QaAnswer(cached.question(), cached.answer(), cached.model(), cached.references(),
+                    cached.retrievedCount(), cached.citationOk(), cached.invalidCitations(),
+                    cached.grounded(), cached.factCount(), cached.missingFacts(), cached.topScore(),
+                    cached.gated(), cached.evidenceCount(), cached.standaloneQuestion(), cost, true);
+        } catch (Exception e) {
+            log.warn("缓存内容解析失败，按未命中处理：{}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 写缓存：只写"可信答案"，TTL 加随机抖动避免同一时刻集体过期。 */
+    private void putCache(String question, int topK, QaAnswer answer) {
+        if (!cacheService.enabled() || answer.gated() || !answer.citationOk()
+                || !answer.grounded() || answer.references().isEmpty()) {
+            return;
+        }
+        String key = cacheKey(question, topK);
+        if (key == null) {
+            return;
+        }
+        try {
+            cacheService.put(key, objectMapper.writeValueAsString(answer),
+                    cacheService.qaTtl());
+        } catch (Exception e) {
+            log.warn("缓存写入失败，忽略：{}", e.getMessage());
+        }
+    }
+
     /** 检索 + 拒答判定（两条生成路径共用）。 */
+
+
     private Prepared prepare(String question, int topK, List<ContextAssembler.Turn> history, long begin) {
         // ---------- 第 0 步：追问补全（多轮专用，只在"这句话自己检索不明白"时才做）----------
         // 先按原句检索一次：分数高说明这句话自己就够清楚，没必要补（省一次模型调用 + 一次检索）
@@ -214,14 +307,14 @@ public class QaService {
         String standaloneQuestion = null;
         RetrievalService.Best best;
         if (history != null && !history.isEmpty() && followupTriggerScore > 0) {
-            best = retrievalService.searchBestGated(question, topK);
-            if (best.topScore() < followupTriggerScore && !best.gated()) {
+            best = retrievalService.searchBestGated(question, topK);// ① 先按原句查一次
+            if (best.topScore() < followupTriggerScore && !best.gated()) { // ② 分数低才补（高就没必要）
                 String completed = queryRewriter.rewriteFollowUp(question, history);
                 if (completed != null && !completed.equals(question)) {
                     RetrievalService.Best second = retrievalService.searchBestGated(completed, topK);
                     // 只有"补全后确实更好"才采用，否则保留原结果——
                     // 补全也是模型在猜，猜错了不能把原本对的结果弄坏
-                    if (second.topScore() > best.topScore()) {
+                    if (second.topScore() > best.topScore()) {// ④ 更好才采用
                         log.info("追问补全生效：「{}」+ 历史 → 「{}」，topScore {} → {}",
                                 question, completed, best.topScore(), second.topScore());
                         standaloneQuestion = completed;
@@ -242,19 +335,19 @@ public class QaService {
                     "本知识库暂未收录与该问题相关的规定，建议咨询学校相关职能部门或查看学校官网。",
                     chatClient.model(), List.of(), 0, true, List.of(),
                     true, 0, List.of(), 0.0, true, 0, standaloneQuestion,
-                    System.currentTimeMillis() - begin));
+                    System.currentTimeMillis() - begin, false));
         }
 
         // 检索分数低于阈值：资料太不相关，问了模型也只能编 → 在检索层就拒答
         // 这是"宁可说没查到，也不猜"的工程化实现，见 docs/09-拒答阈值
-        if (best.gated()) {
+        if (best.gated()) { // 分太低，低于阈值
             return new Prepared(best, standaloneQuestion, new QaAnswer(question,
                     "本知识库暂未收录与该问题相关的规定（检索置信度不足，最高相关度 "
                             + best.topScore() + "，低于阈值 " + best.threshold() + "）。\n\n"
                             + "你可以换一种问法重试，也可以直接咨询学校相关职能部门。",
                     chatClient.model(), List.of(), best.hits().size(), true, List.of(),
                     true, 0, List.of(), best.topScore(), true, 0, standaloneQuestion,
-                    System.currentTimeMillis() - begin));
+                    System.currentTimeMillis() - begin, false));
         }
         return new Prepared(best, standaloneQuestion, null);
     }
@@ -271,7 +364,7 @@ public class QaService {
     private Validated validate(String answer, List<RetrievalService.Hit> hits) {
         List<Integer> cited = new ArrayList<>();
         List<Integer> invalid = new ArrayList<>();
-        Matcher m = CITATION.matcher(answer);
+        Matcher m = CITATION.matcher(answer);// 正则 \[(\d{1,2})]
         while (m.find()) {
             int n = Integer.parseInt(m.group(1));
             if (n >= 1 && n <= hits.size()) {
@@ -317,7 +410,7 @@ public class QaService {
         return new QaAnswer(question, answer, chatClient.model(), validated.references(), hits.size(),
                 validated.citationOk(), validated.invalid(), guard.missing().isEmpty(),
                 guard.factCount(), guard.missing(), prepared.best().topScore(), false,
-                evidenceCount, prepared.standaloneQuestion(), System.currentTimeMillis() - begin);
+                evidenceCount, prepared.standaloneQuestion(), System.currentTimeMillis() - begin, false);
     }
 
     /** 检索阶段的结果：earlyAnswer 不为 null 表示"检索层就决定了不生成" */

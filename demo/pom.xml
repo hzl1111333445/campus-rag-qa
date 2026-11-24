@@ -42,6 +42,16 @@
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
+
+        <!--
+          Redis：用来做问答结果缓存、embedding 缓存和接口限流。
+          为什么是 spring-boot-starter-data-redis 而不是 jedis？Boot 默认带 Lettuce（基于 Netty，
+          连接复用更好、支持异步），而且零配置就能拿到 StringRedisTemplate。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
         <!--
           Apache Tika：文档解析库。给它一个 PDF/Word 的字节流，它把里面的文字抠出来。
           为什么不用 PDFBox 自己写？因为除了 PDF 还有 docx、doc、甚至 ppt，

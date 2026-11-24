@@ -70,7 +70,7 @@ public class Bm25Index {
      * <p>复杂度 O(总词数)，414 个块大约 2 万个 token，建一次几毫秒。
      * 所以不要在每次查询时重建——见 RetrievalService 里的缓存。
      */
-    public static Bm25Index build(List<DocumentDao.ChunkWithEmbedding> chunks) {
+    public static Bm25Index build(List<DocumentDao.ChunkWithEmbedding> chunks) {//建索引：一次扫全库，记下"每块里每个词出现几次"
         int n = chunks.size();
         List<Map<String, Integer>> termFreqs = new ArrayList<>(n);
         Map<String, Integer> docFreq = new HashMap<>();
@@ -104,7 +104,7 @@ public class Bm25Index {
      * 缓存指纹：块数 + 最大块 id。
      * 只要这两样没变，索引就可以复用；一变（上传/删除文档）就重建。
      */
-    public String fingerprint() {
+    public String fingerprint() {//fingerprint()（缓存指纹）
         long maxId = 0;
         for (DocumentDao.ChunkWithEmbedding c : chunks) {
             maxId = Math.max(maxId, c.chunkId());
@@ -118,8 +118,8 @@ public class Bm25Index {
      * @param query 用户问题
      * @return 长度 = 块数的分数数组，下标和第块一一对应
      */
-    public double[] scores(String query) {
-        // 1) 问题也分词，并去重：同一个词问两遍不该算两遍分
+    public double[] scores(String query) {//打分：给每个块算一个分数，返回 double[]
+        // 1) 用 Set 而不是 List：问题也分词，并去重：同一个词问两遍不该算两遍分
         Set<String> queryTerms = new LinkedHashSet<>(Tokenizer.tokenize(query));
         double[] scores = new double[chunks.size()];
         if (queryTerms.isEmpty() || chunks.isEmpty()) {
@@ -169,7 +169,7 @@ public class Bm25Index {
      * 顺手提供一个"查询词被覆盖了多少"的指标（IDF 加权）。
      * 以后做重排时可以直接用：正确块通常覆盖了问题里更多的高 IDF 词。
      */
-    public double idfCoverage(String query, int chunkIndex) {
+    public double idfCoverage(String query, int chunkIndex) {//idfCoverage()（覆盖度信号）
         if (chunkIndex < 0 || chunkIndex >= chunks.size()) {
             return 0;
         }

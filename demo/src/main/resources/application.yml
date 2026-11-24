@@ -19,6 +19,16 @@ spring:
     multipart:        # 文件上传大小限制，不写的话默认 1MB，传大文件会报错
       max-file-size: 20MB
       max-request-size: 25MB
+  # ---------- Redis（缓存 + 限流，见 docs/25）----------
+  # 为什么不写连接池参数？Lettuce 默认共享一条连接 + 异步复用，我们这种量级够用。
+  # timeout 故意设短（800ms）：缓存的定位是"快就省，慢就绕过"，
+  # 绝不能因为 Redis 慢把整个问答拖死——所以超时必须比业务超时小得多。
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      timeout: 800ms
+      connect-timeout: 800ms
 
 campus:
   upload-dir: ./data/uploads   # 上传的文件存这里
@@ -60,6 +70,27 @@ campus:
     turns: ${CONTEXT_TURNS:3}                 # 带最近几轮（1 轮 = 问 + 答）
     max-chars-per-msg: ${CONTEXT_MAX_CHARS_PER_MSG:120}   # 单条历史截断长度
     max-total-chars: ${CONTEXT_MAX_TOTAL_CHARS:600}       # 历史总字数上限，防止历史挤掉【资料】
+  # ---------- 缓存（Redis，见 docs/25-缓存与限流.md）----------
+  # 三件事：问答结果缓存、embedding 缓存、接口限流。
+  # 全部可用环境变量关闭：CACHE_ENABLED=false 就退回"每次都真算"的老行为，
+  # 这样压测和评测能拿到干净数据（缓存命中会污染延迟指标）。
+  cache:
+    enabled: ${CACHE_ENABLED:true}
+    # 问答结果缓存：命中的前提是"问题 + topK + 索引指纹 + 模型 + 提示词版本"全部一致
+    qa-ttl-seconds: ${CACHE_QA_TTL_SECONDS:3600}          # 1 小时
+    qa-ttl-jitter-seconds: ${CACHE_QA_TTL_JITTER:300}     # 随机抖动，防同一批 key 同时过期
+    # embedding 缓存：同一段文字第二次不用再花钱算向量
+    embedding-ttl-seconds: ${CACHE_EMBED_TTL_SECONDS:604800}   # 7 天
+    # 限流：每个身份每分钟最多问几次（防止有人拿脚本刷 DeepSeek 额度）
+    rate-limit-per-minute: ${CACHE_RATE_LIMIT_PER_MINUTE:30}
+  # ---------- 登录与权限 ----------
+  # secret 是签名钥匙：换掉它，所有已发出的令牌立即失效。
+  # 生产环境必须用环境变量注入（AUTH_SECRET），绝不能把真钥匙提交进 Git。
+  # 注意：这一节必须缩在 campus 下面。之前误缩进到 logging 下，
+  # 结果 @Value("${campus.auth.secret:默认值}") 一直吃到默认值，改 AUTH_SECRET 也没用。
+  auth:
+    secret: ${AUTH_SECRET:dev-only-change-me-in-production}
+    expire-minutes: ${AUTH_EXPIRE_MINUTES:720}   # 令牌有效期，默认 12 小时
   embedding:
     provider: ${EMBEDDING_PROVIDER:openai}   # openai = 真模型；hash = 离线假向量（还没写）
     model: ${EMBEDDING_MODEL:BAAI/bge-m3}    # 硅基流动上的免费向量模型
@@ -91,10 +122,3 @@ campus:
 logging:
   level:
     com.campus.rag: debug      # 自己包的日志打详细点，方便看程序走到哪一步
-
-  # ---------- 登录与权限 ----------
-  # secret 是签名钥匙：换掉它，所有已发出的令牌立即失效。
-  # 生产环境必须用环境变量注入（AUTH_SECRET），绝不能把真钥匙提交进 Git。
-  auth:
-    secret: ${AUTH_SECRET:dev-only-change-me-in-production}
-    expire-minutes: ${AUTH_EXPIRE_MINUTES:720}   # 令牌有效期，默认 12 小时

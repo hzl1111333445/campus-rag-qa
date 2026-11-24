@@ -68,7 +68,7 @@
 
 | 层 | 选型 |
 |---|---|
-| 后端 | Java 21、Spring Boot 3.5.16、JdbcTemplate、MySQL 8 |
+| 后端 | Java 21、Spring Boot 3.5.16、JdbcTemplate、MySQL 8、Redis 7（问答缓存 + 限流，可一键关闭） |
 | 文档解析 | Apache Tika 3.3.3（PDF/DOCX/TXT）、Windows OCR（扫描件） |
 | 检索 | 手写 BM25（单字 + 双字 bigram）、bge-m3（1024 维）、bge-reranker-v2-m3、RRF(k=60) |
 | 生成 | DeepSeek（OpenAI 兼容协议），支持 SSE 流式 |
@@ -81,7 +81,7 @@
 
 ### 1. 环境
 
-- JDK 21、Maven 3.9+、MySQL 8、Node 18+
+- JDK 21、Maven 3.9+、MySQL 8、**Redis 7（可选：不装也能跑，设 `CACHE_ENABLED=false`）**、Node 18+
 - 大模型与向量服务需要 API Key（硅基流动 / DeepSeek）
 
 ### 2. 建库
@@ -180,6 +180,7 @@ curl -X POST "http://localhost:8081/api/dev/embed-all"      # 补齐未向量化
 | 认证 | `POST /api/auth/login`、`GET /api/auth/me` |
 | 问答 | `POST /api/qa`、`POST /api/qa/stream`（SSE）、`GET /api/qa/preview` |
 | 会话 | `GET/POST /api/session`、`PATCH/DELETE /api/session/{id}`、`GET /api/session/{id}/messages` |
+| 缓存（仅管理员） | `GET /api/dev/cache/stats`、`POST /api/dev/cache/purge?target=qa\|emb\|rate\|all`、`POST /api/dev/cache/reset-stats` |
 | 文档 | `POST /api/document/upload`、`GET /api/document/page`、`GET /api/document/{id}/chunks`、`POST /api/document/{id}/reprocess`、`POST /api/document/{id}/embed`、`DELETE /api/document/{id}` |
 | 检索 | `GET /api/search`、`/api/search/compare`、`/api/search/stats`、`/api/search/weights`、`/api/search/rewrite`、`/api/search/rewrite-stats` |
 | 评测 | `GET /api/eval/testset`、`GET /api/eval/run`、`POST /api/eval/jobs`、`GET /api/eval/jobs/{id}`、`GET /api/eval/jobs` |
@@ -227,7 +228,7 @@ data/testset/              120 题评测集（TSV）
 
 - 严格正确率 51.7%，与成熟 RAG 系统（80%+）仍有差距，主要损耗在生成层加料（32.2 个点）
 - 硬改写（口语 vs 术语）检索只有 73.33%，是下一个优化点
-- 尚未做压测（无 QPS/P95 并发数据）、未接入 Redis 缓存
+- 尚未做压测（无 QPS/P95 并发数据）；Redis 缓存已接入，但目前只缓存「问答结果」，embedding 缓存与限流待接
 - 令牌无法吊销（只能等过期）；密码哈希用 SHA-256，生产应换 BCrypt/Argon2
 - 流式输出暂不支持"停止生成"与断线重连
 - 3 页 OCR 仍有乱码

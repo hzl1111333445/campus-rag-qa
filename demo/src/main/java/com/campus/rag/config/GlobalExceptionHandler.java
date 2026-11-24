@@ -6,8 +6,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -42,6 +45,26 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException e) {
         return ResponseEntity.badRequest().body(body(400, e.getMessage()));
+    }
+
+    /**
+     * 方法不被支持（比如对只支持 GET 的接口发 POST）→ 405。
+     *
+     * <p>这条是踩出来的：缓存统计接口只写了 {@code @GetMapping}，用 POST 调时
+     * Spring 抛 {@code HttpRequestMethodNotSupportedException}，被下面的兜底处理器
+     * 变成了 500"服务器内部错误"——明明是我调错了方法，却看起来像服务器坏了。
+     */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<Map<String, Object>> handleMethodNotSupported(
+            HttpRequestMethodNotSupportedException e) {
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(body(405, "该接口不支持 " + e.getMethod() + " 方法"));
+    }
+
+    /** 路径不存在 → 404（同理，不能报成 500） */
+    @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
+    public ResponseEntity<Map<String, Object>> handleNotFound(Exception e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body(404, "接口不存在"));
     }
 
     /** 兜底 → 500，并且把堆栈打进日志（前端只看到一句话，方便排查又不泄露内部细节） */
