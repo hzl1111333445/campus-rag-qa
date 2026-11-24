@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import http, { getToken } from '../api/http'
@@ -37,6 +37,23 @@ const sending = ref(false)
 const scrollBox = ref(null)
 /** 每条回答的出处面板是否展开：{ [messageId]: true } */
 const refsOpen = ref({})
+
+/**
+ * 我对每条回答的评价：{ [messageId]: { level: 2|1|0, problems: string[] } }。
+ * level 三档而不是赞/踩二元——"回答不完整"不等于"没用"，拿到一半信息也算收获。
+ */
+const myFeedback = ref({})
+/** level<2 时弹缺陷选择框（多选） */
+const fbDialog = ref({ visible: false, messageId: 0, level: 1, submitting: false })
+const fbForm = reactive({ problems: [], comment: '' })
+/** 与后端 FeedbackController.PROBLEMS 保持一致（后端会过滤，前端只是别让人瞎填） */
+const FB_PROBLEMS = ['不完整', '有错误', '答非所问', '没依据', '太啰嗦', '其他']
+/** 三档的文案与颜色集中在这里，模板里只引用，避免出现两处不一致 */
+const LEVELS = {
+  2: { label: '解决了', icon: '👍', cls: 'up', hint: '问题被答全了' },
+  1: { label: '部分', icon: '🤏', cls: 'mid', hint: '拿到了有用信息，但还差细节' },
+  0: { label: '没解决', icon: '👎', cls: 'down', hint: '答偏了 / 没依据 / 该答却没答' }
+}
 
 let seq = 0
 
@@ -100,6 +117,7 @@ function toAnswer(m) {
     }
   }
   return {
+    messageId: m.id,          // 反馈接口要它：这条 assistant 消息在库里的主键
     answer: m.content,
     gated: !!m.gated,
     citationOk: m.citation_ok !== null && m.citation_ok !== undefined ? !!m.citation_ok : true,
@@ -268,8 +286,8 @@ async function streamAsk(q, replyId) {
           stage: '',
           ttftMs: data.ttftMs,
           totalMs: data.totalMs,
-          // 拒答题没有 token，答案在 done.answer 里
-          data: data.answer
+          // 拒答题没有 token，答案在 done.answer 里；messageId 用于提交赞/踩
+          data: { ...data.answer, messageId: data.messageId }
         })
         scrollToBottom()
       } else if (eventName === 'error') {
@@ -294,6 +312,57 @@ function onEnter(e) {
 
 function toggleRefs(id) {
   refsOpen.value = { ...refsOpen.value, [id]: !refsOpen.value[id] }
+}
+
+/**
+ * 评价一条回答。
+ *
+ * <p>为什么"解决了"直接提交、"部分/没解决"要弹框：完全解决不需要解释；
+ * 而部分解决和没解决必须问"缺什么"——不收集缺陷的话，后台只多一个计数，
+ * 下一轮根本不知道该改检索、改提示词还是补语料。
+ *
+ * @param m     页面上那条 assistant 消息
+ * @param level 2=解决了、1=部分、0=没解决
+ */
+async function rate(m, level) {
+  const mid = m.data?.messageId
+  if (!mid) {
+    ElMessage.warning('这条回答没有入库（评测/无痕调用），不能评价')
+    return
+  }
+  if (level === 2) {
+    await submitFeedback(mid, 2, null, null)
+    return
+  }
+  fbForm.problems = myFeedback.value[mid]?.problems ? [...myFeedback.value[mid].problems] : ['不完整']
+  fbForm.comment = ''
+  fbDialog.value = { visible: true, messageId: mid, level, submitting: false }
+}
+
+/** 真正发请求；失败交给 http 拦截器统一提示 */
+async function submitFeedback(messageId, level, problems, comment) {
+  try {
+    await http.post('/feedback', { messageId, level, problems, comment })
+    myFeedback.value = {
+      ...myFeedback.value,
+      [messageId]: { level, problems: problems ? problems.split(',') : [] }
+    }
+    ElMessage.success(level === 2 ? '谢谢认可，已记录' : '已记录，会按缺陷归类去看')
+  } catch {
+    /* 已在拦截器提示 */
+  }
+}
+
+async function confirmFeedback() {
+  const { messageId, level } = fbDialog.value
+  fbDialog.value.submitting = true
+  try {
+    const problems = fbForm.problems.length ? fbForm.problems.join(',') : null
+    await submitFeedback(messageId, level, problems, fbForm.comment || null)
+    fbDialog.value.visible = false
+  } finally {
+    fbDialog.value.submitting = false
+  }
 }
 
 async function copyAnswer(text) {
@@ -512,6 +581,16 @@ onMounted(async () => {
               <div class="answer-foot">
                 <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms<template v-if="m.ttftMs"> · 首字 {{ m.ttftMs }} ms</template></span>
                 <span class="foot-actions">
+                  <button
+                    v-for="lv in [2, 1, 0]"
+                    :key="lv"
+                    class="foot-btn fx"
+                    :class="[LEVELS[lv].cls, { active: myFeedback[m.data.messageId]?.level === lv }]"
+                    :title="myFeedback[m.data.messageId]?.level === lv ? '已评价，可点其他档位修改' : LEVELS[lv].hint"
+                    @click="rate(m, lv)"
+                  >
+                    {{ LEVELS[lv].icon }} {{ LEVELS[lv].label }}
+                  </button>
                   <button class="foot-btn" @click="copyAnswer(m.data.answer)">复制</button>
                   <button class="foot-btn" @click="toggleRefs(m.id)">溯源</button>
                 </span>
@@ -520,6 +599,34 @@ onMounted(async () => {
           </template>
         </div>
       </div>
+
+      <!-- 缺陷多选：只在"部分/没解决"时问。把"缺什么"单独收集，下一轮才知道该改哪一层 -->
+      <el-dialog
+        v-model="fbDialog.visible"
+        :title="fbDialog.level === 1 ? '还差什么？' : '哪里没帮到你？'"
+        width="460px"
+        align-center
+      >
+        <div class="fb-tip">
+          可多选。选"部分"是为了记下"有用但不全"，不会被算成差评。
+        </div>
+        <el-checkbox-group v-model="fbForm.problems" class="fb-problems">
+          <el-checkbox v-for="p in FB_PROBLEMS" :key="p" :value="p" border>{{ p }}</el-checkbox>
+        </el-checkbox-group>
+        <el-input
+          v-model="fbForm.comment"
+          type="textarea"
+          :rows="2"
+          maxlength="200"
+          show-word-limit
+          placeholder="补充说明（选填）：哪一句不对、缺了什么"
+          class="fb-comment"
+        />
+        <template #footer>
+          <el-button @click="fbDialog.visible = false">取消</el-button>
+          <el-button type="primary" :loading="fbDialog.submitting" @click="confirmFeedback">提交</el-button>
+        </template>
+      </el-dialog>
 
       <div class="chat-input">
         <div class="input-box">
@@ -922,6 +1029,45 @@ onMounted(async () => {
   cursor: pointer;
   font-size: 12px;
   padding: 0 4px;
+}
+.foot-btn.fx {
+  opacity: 0.75;
+}
+.foot-btn.fx:hover {
+  opacity: 1;
+}
+.foot-btn.fx.up {
+  color: #529b2e;
+}
+.foot-btn.fx.mid {
+  color: #b88230;
+}
+.foot-btn.fx.down {
+  color: #c45656;
+}
+/* 已选中的那一档加粗 + 底色，让"我评过这条"一眼可见 */
+.foot-btn.fx.active {
+  opacity: 1;
+  font-weight: 600;
+  background: #f4f4f5;
+  border-radius: 4px;
+}
+.fb-tip {
+  font-size: 12.5px;
+  color: #909399;
+  margin-bottom: 10px;
+  line-height: 1.6;
+}
+.fb-problems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.fb-problems :deep(.el-checkbox) {
+  margin-right: 0;
+}
+.fb-comment {
+  margin-top: 12px;
 }
 .foot-btn:hover {
   color: #1f6feb;

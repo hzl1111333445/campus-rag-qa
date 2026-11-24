@@ -88,6 +88,10 @@ campus:
   # 生产环境必须用环境变量注入（AUTH_SECRET），绝不能把真钥匙提交进 Git。
   # 注意：这一节必须缩在 campus 下面。之前误缩进到 logging 下，
   # 结果 @Value("${campus.auth.secret:默认值}") 一直吃到默认值，改 AUTH_SECRET 也没用。
+  # 评测题集位置：相对仓库根；换机器/换目录不用改代码，也可以直接给绝对路径
+  eval:
+    testset: ${EVAL_TESTSET:data/testset/eval_questions.tsv}
+
   auth:
     secret: ${AUTH_SECRET:dev-only-change-me-in-production}
     expire-minutes: ${AUTH_EXPIRE_MINUTES:720}   # 令牌有效期，默认 12 小时

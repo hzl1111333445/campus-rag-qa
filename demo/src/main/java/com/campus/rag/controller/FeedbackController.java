@@ -23,7 +23,7 @@ import java.util.Map;
  * <ul>
  *   <li>POST /api/feedback                —— 学生对某条回答点赞/点踩（可改主意）</li>
  *   <li>GET  /api/feedback/mine           —— 我在某条消息上的评价（前端回显已赞/已踩）</li>
- *   <li>GET  /api/feedback/page           —— 管理端列表（分页、可按 rating 过滤）</li>
+ *   <li>GET  /api/feedback/page           —— 管理端列表（分页、可按 level 过滤）</li>
  *   <li>GET  /api/feedback/stats?days=7   —— 管理端统计（满意度、点踩原因、按天趋势）</li>
  * </ul>
  *
@@ -34,8 +34,9 @@ import java.util.Map;
 @RequestMapping("/api/feedback")
 public class FeedbackController {
 
-    /** 点踩原因白名单：只收这五个词，避免自由文本把聚合搞乱。 */
-    private static final List<String> REASONS = List.of("答非所问", "没有依据", "不完整", "太啰嗦", "其他");
+    /** 缺陷白名单：只收这几个词，避免自由文本把聚合搞乱（多选，逗号分隔）。 */
+    private static final List<String> PROBLEMS =
+            List.of("不完整", "有错误", "答非所问", "没依据", "太啰嗦", "其他");
 
     private final FeedbackDao feedbackDao;
 
@@ -43,7 +44,15 @@ public class FeedbackController {
         this.feedbackDao = feedbackDao;
     }
 
-    public record FeedbackRequest(Long messageId, Integer rating, String reason, String comment) {
+    /**
+     * 一次评价。
+     *
+     * @param messageId 被评价的 assistant 消息 id（前端从 SSE 的 done 事件里拿到）
+     * @param level     2=完全解决、1=部分解决、0=未解决；只收这三个值
+     * @param problems  缺陷多选（逗号分隔），level=2 时忽略
+     * @param comment   补充说明，最多 200 字
+     */
+    public record FeedbackRequest(Long messageId, Integer level, String problems, String comment) {
     }
 
     @PostMapping
@@ -57,32 +66,31 @@ public class FeedbackController {
         if (req.messageId() == null || req.messageId() <= 0) {
             throw new IllegalArgumentException("messageId 不能为空");
         }
-        if (req.rating() == null || (req.rating() != 1 && req.rating() != -1)) {
-            throw new IllegalArgumentException("rating 只能是 1（有用）或 -1（没用）");
+        Integer level = req.level();
+        if (level == null || level < FeedbackDao.LEVEL_UNSOLVED || level > FeedbackDao.LEVEL_SOLVED) {
+            throw new IllegalArgumentException("level 只能是 2（完全解决）/ 1（部分解决）/ 0（未解决）");
         }
         // 越权一律回"消息不存在"：告诉调用方"存在但你没权限"等于泄露别人的会话 id 可枚举
         if (!feedbackDao.canRate(req.messageId(), userId)) {
             throw new IllegalArgumentException("消息不存在：" + req.messageId());
         }
 
-        int rating = req.rating();
-        String reason = trim(req.reason());
-        if (rating == 1) {
-            reason = null;                       // 点赞不需要原因
-        } else if (reason != null && !REASONS.contains(reason)) {
-            throw new IllegalArgumentException("reason 只能是：" + String.join(" / ", REASONS));
+        String problems = null;
+        if (level < FeedbackDao.LEVEL_SOLVED) {
+            // 完全解决不需要解释"缺什么"；部分解决/未解决才收缺陷
+            problems = normalizeProblems(req.problems());
         }
         String comment = trim(req.comment());
         if (comment != null && comment.length() > 200) {
             comment = comment.substring(0, 200); // 表是 500，但前端只让填 200，接口兜一层
         }
 
-        feedbackDao.upsert(req.messageId(), userId, rating, reason, comment);
+        feedbackDao.upsert(req.messageId(), userId, level, problems, comment);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("messageId", req.messageId());
-        out.put("rating", rating);
-        out.put("reason", reason);
+        out.put("level", level);
+        out.put("problems", problems);
         return out;
     }
 
@@ -104,7 +112,7 @@ public class FeedbackController {
     public Map<String, Object> page(
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int size,
-            @RequestParam(required = false) Integer rating,
+            @RequestParam(required = false) Integer level,
             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
             @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role) {
 
@@ -112,8 +120,8 @@ public class FeedbackController {
         int p = Math.max(page, 1);
         int s = Math.min(Math.max(size, 1), 100);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("total", feedbackDao.count(rating));
-        out.put("records", feedbackDao.page(rating, s, (p - 1) * s));
+        out.put("total", feedbackDao.count(level));
+        out.put("records", feedbackDao.page(level, s, (p - 1) * s));
         out.put("page", p);
         out.put("size", s);
         return out;
@@ -136,6 +144,34 @@ public class FeedbackController {
         if (!AuthService.ROLE_ADMIN.equals(role)) {
             throw new ForbiddenException("该功能仅管理员可用");
         }
+    }
+
+    /**
+     * 校验并规整缺陷多选：只留白名单里的词、去重、逗号分隔、总长不超 200。
+     *
+     * <p>过滤而不是报错：前端可能因为版本差异多传一个词，为此让整条评价失败不值得；
+     * 但如果一个合法词都没有，就当没填。
+     */
+    private static String normalizeProblems(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String part : raw.split("[,，]")) {
+            String p = part.trim();
+            if (!PROBLEMS.contains(p) || sb.indexOf(p) >= 0) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(',');
+            }
+            sb.append(p);
+        }
+        String out = sb.toString();
+        if (out.isEmpty()) {
+            return null;
+        }
+        return out.length() > 200 ? out.substring(0, 200) : out;
     }
 
     private static String trim(String s) {

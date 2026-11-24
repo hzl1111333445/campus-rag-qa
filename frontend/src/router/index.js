@@ -6,6 +6,7 @@ import DocView from '../views/DocView.vue'
 import LoginView from '../views/LoginView.vue'
 import DebugView from '../views/DebugView.vue'
 import EvalView from '../views/EvalView.vue'
+import FeedbackView from '../views/FeedbackView.vue'
 import { isAdmin, isLoggedIn } from '../store/auth'
 
 /**
@@ -53,6 +54,12 @@ const routes = [
     name: 'eval',
     component: EvalView,
     meta: { title: '评测看板', adminOnly: true }
+  },
+  {
+    path: '/feedback',
+    name: 'feedback',
+    component: FeedbackView,
+    meta: { title: '用户反馈', adminOnly: true }
   }
 ]
 

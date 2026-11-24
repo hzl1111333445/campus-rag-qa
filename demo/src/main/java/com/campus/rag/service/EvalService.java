@@ -43,12 +43,27 @@ public class EvalService {
     private final RetrievalService retrievalService;
     private final DocumentDao documentDao;
 
-    /** 题集路径：默认从运行目录的上一级找（IDE 里运行目录是 demo/，题集在仓库根 data/testset/） */
+    /** 题集路径（配置项 campus.eval.testset） */
     private final String testsetPath;
+
+    /**
+     * 题集位置候选：同一个 jar 在不同目录下起，相对路径不一样。
+     *
+     * <p>踩过的坑：`java -jar` 从仓库根起时，配置里的 `../data/...` 会解析到 `E:\tmp\data`，
+     * 直接 500「找不到评测题集」；而 IDE 里运行目录是 `demo/`，`../data/...` 才是对的。
+     * 所以不在配置里赌一个路径，而是**依次尝试**、谁存在用谁，并把最终路径打日志。
+     */
+    private static final List<String> TESTSET_FALLBACKS = List.of(
+            "../data/testset/eval_questions.tsv",
+            "data/testset/eval_questions.tsv",
+            "demo/data/testset/eval_questions.tsv");
+
+    /** 解析结果缓存：一轮评测会反复读题集，别每次都试一遍 */
+    private volatile Path resolvedTestset;
 
     public EvalService(RetrievalService retrievalService,
                        DocumentDao documentDao,
-                       @Value("${campus.eval.testset:../data/testset/eval_questions.tsv}") String testsetPath) {
+                       @Value("${campus.eval.testset:data/testset/eval_questions.tsv}") String testsetPath) {
         this.retrievalService = retrievalService;
         this.documentDao = documentDao;
         this.testsetPath = testsetPath;
@@ -233,13 +248,43 @@ public class EvalService {
             typeCount.merge(q.type(), 1, Integer::sum);
         }
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("path", testsetPath);
+        m.put("path", testsetFile().toString());
         m.put("questionCount", all.size());
         m.put("typeCount", typeCount);
         m.put("variants", RetrievalService.EVAL_VARIANTS.stream()
                 .map(v -> Map.of("code", v.code(), "label", v.label()))
                 .toList());
         return m;
+    }
+
+    /**
+     * 找到真正可用的题集文件：配置值优先，其余候选依次尝试。
+     *
+     * @throws IllegalStateException 全部候选都不存在时，报出所有尝试过的路径（便于一眼定位）
+     */
+    Path testsetFile() {
+        Path cached = resolvedTestset;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (this) {
+            if (resolvedTestset != null) {
+                return resolvedTestset;
+            }
+            List<String> tried = new ArrayList<>();
+            tried.add(testsetPath);
+            tried.addAll(TESTSET_FALLBACKS);
+            for (String candidate : tried) {
+                Path p = Path.of(candidate);
+                if (Files.exists(p)) {
+                    resolvedTestset = p.toAbsolutePath().normalize();
+                    log.info("评测题集路径：{}（候选第 {} 个）", resolvedTestset, tried.indexOf(candidate) + 1);
+                    return resolvedTestset;
+                }
+            }
+            throw new IllegalStateException("找不到评测题集，已尝试：" + String.join("  /  ", tried)
+                    + "。可用 campus.eval.testset 指定绝对路径。");
+        }
     }
 
     /**
@@ -250,11 +295,7 @@ public class EvalService {
      * 这样才能追溯"这次结果是用哪版题集跑出来的"。
      */
     List<Question> loadQuestions() {
-        Path path = Path.of(testsetPath);
-        if (!Files.exists(path)) {
-            throw new IllegalStateException("找不到评测题集：" + path.toAbsolutePath()
-                    + "。检查 campus.eval.testset 配置，或确认工作目录。");
-        }
+        Path path = testsetFile();
         List<Question> out = new ArrayList<>();
         try {
             for (String raw : Files.readAllLines(path, StandardCharsets.UTF_8)) {

@@ -53,6 +53,7 @@ SHOW INDEX FROM qa_feedback;          -- 唯一键/索引在不在
 | 2026-11-22 | `v2-chunk-embedding.sql` | `kb_chunk` 加 `embedding` / `embedding_model` | ✅ | `SHOW COLUMNS FROM kb_chunk` |
 | 2026-11-23 | `migration-2026-11-23-session-user.sql` | `qa_session` 加 `user_id` + 索引 `idx_user_update` | ✅ | `SHOW INDEX FROM qa_session` |
 | 2026-11-24 | `migration-2026-11-24-feedback.sql` | 新建 `qa_feedback`（赞踩反馈）+ 唯一键 `uk_message_user` | ✅ | `SHOW INDEX FROM qa_feedback` 见 `uk_message_user` |
+| 2026-11-24 | `migration-2026-11-24-feedback-level.sql` | `qa_feedback` 加 `level`（三档解决程度）+ `problems`（缺陷多选），旧 `rating`/`reason` 改可空并标记废弃，历史数据按 `rating=1→2 / rating=-1→0` 换算 | ✅ | `SHOW COLUMNS FROM qa_feedback` 见 `level`/`problems`；`SELECT id,level,problems,rating FROM qa_feedback` 两条旧数据已换算 |
 
 ## 三条红线
 
