@@ -94,3 +94,22 @@ CREATE TABLE IF NOT EXISTS sys_user (
     PRIMARY KEY (id),
     UNIQUE KEY uk_username (username)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '系统用户';
+
+
+-- 回答反馈：学生对某条回答点赞/点踩（v2.0 第一块）。
+-- (message_id, user_id) 唯一：同一个人对同一条回答只保留一条评价，重复提交走 UPDATE。
+-- 老库升级请执行 migration-2026-11-24-feedback.sql（schema.sql 只做 CREATE IF NOT EXISTS）。
+CREATE TABLE IF NOT EXISTS qa_feedback (
+    id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    message_id  BIGINT UNSIGNED NOT NULL              COMMENT '被评价的 qa_message.id（assistant 那条）',
+    user_id     BIGINT UNSIGNED NOT NULL              COMMENT '评价人 sys_user.id',
+    rating      TINYINT         NOT NULL              COMMENT '1 有用 / -1 没用',
+    reason      VARCHAR(32)     NULL                  COMMENT '点踩的预设原因：答非所问/没有依据/不完整/太啰嗦/其他',
+    comment     VARCHAR(500)    NULL                  COMMENT '补充说明（可空）',
+    create_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_message_user (message_id, user_id),
+    KEY idx_create_time (create_time),
+    KEY idx_rating_time (rating, create_time)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '回答反馈（点赞/点踩）';

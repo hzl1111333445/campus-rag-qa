@@ -6,6 +6,7 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.sql.Types;
 import java.util.List;
 import java.util.Map;
@@ -111,7 +112,7 @@ public class SessionDao {
      * <p>assistant 那行会带上当次的校验信号与引用快照；user 那行这些字段传 null。
      * 用 setObject + Types 是为了能传 null（JdbcTemplate 的 varargs 对 null 不友好）。
      */
-    public void insertMessage(long sessionId, String role, String content,
+    public long insertMessage(long sessionId, String role, String content,
                               boolean gated, Boolean citationOk, Boolean grounded,
                               Integer factCount, Double topScore, Long elapsedMs,
                               String referencesJson, String missingFacts) {
@@ -121,7 +122,11 @@ public class SessionDao {
                     fact_count, top_score, elapsed_ms, references_json, missing_facts)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
-        jdbc.update(sql, (PreparedStatement ps) -> {
+        // 用 GeneratedKeyHolder 回填自增主键：前端要拿 messageId 提交反馈，
+        // 所以这里必须知道刚插进去的是哪一行（不能插完再按内容查，内容可能重复）。
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            PreparedStatement ps = con.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
             ps.setLong(1, sessionId);
             ps.setString(2, role);
             ps.setString(3, content);
@@ -133,7 +138,10 @@ public class SessionDao {
             setNullableLong(ps, 9, elapsedMs);
             setNullableString(ps, 10, referencesJson);
             setNullableString(ps, 11, missingFacts);
-        });
+            return ps;
+        }, keyHolder);
+        Number key = keyHolder.getKey();
+        return key == null ? 0L : key.longValue();
     }
 
     /** 某个会话的全部消息，按时间正序（前端就是从上往下渲染）。 */

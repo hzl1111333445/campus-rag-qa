@@ -126,10 +126,11 @@ public class QaController {
         QaService.QaAnswer answer = qaService.ask(question, topK, history);
 
         // 存消息。存失败不影响本次回答——问答是主线，记账是副线，副线出错只记日志。
+        long messageId = 0L;
         try {
             sessionDao.insertMessage(sessionId, "user", question,
                     false, null, null, null, null, null, null, null);
-            sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
+            messageId = sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
                     answer.gated(),
                     answer.citationOk(),
                     answer.grounded(),
@@ -144,6 +145,7 @@ public class QaController {
 
         return ResponseEntity.ok()
                 .header("X-Session-Id", String.valueOf(sessionId))
+                .header("X-Message-Id", String.valueOf(messageId))   // 前端拿它提交反馈
                 .body(answer);
     }
 
@@ -213,17 +215,17 @@ public class QaController {
                         send(emitter, "token", Map.of("delta", delta));
                     });
 
+            // 先落库再发 done：前端要拿到 messageId 才能提交反馈（差几毫秒，值得）
+            long messageId = persist ? saveMessages(sessionId, question, answer) : 0L;
+
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("answer", answer);
+            done.put("messageId", messageId);
             long ttft = firstTokenAt.get() > 0 ? firstTokenAt.get() - begin : 0;
             done.put("ttftMs", ttft);
             done.put("totalMs", System.currentTimeMillis() - begin);
             send(emitter, "done", done);
             emitter.complete();
-
-            if (persist) {
-                saveMessages(sessionId, question, answer);
-            }
         } catch (Exception e) {
             log.warn("流式问答失败：{}", e.toString());
             try {
@@ -264,16 +266,18 @@ public class QaController {
     }
 
     /** 把一问一答落库（流式路径也复用，保证历史和普通问答一致） */
-    private void saveMessages(long sessionId, String question, QaService.QaAnswer answer) {
+    /** 存两条消息，返回 assistant 那条的自增 id（前端拿它提交反馈；失败返回 0）。 */
+    private long saveMessages(long sessionId, String question, QaService.QaAnswer answer) {
         try {
             sessionDao.insertMessage(sessionId, "user", question,
                     false, null, null, null, null, null, null, null);
-            sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
+            return sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
                     answer.gated(), answer.citationOk(), answer.grounded(), answer.factCount(),
                     answer.topScore(), answer.elapsedMs(), toJson(answer.references()),
                     joinFacts(answer.missingFacts()));
         } catch (Exception e) {
             log.warn("保存会话消息失败 sessionId={}: {}", sessionId, e.toString());
+            return 0L;
         }
     }
 
