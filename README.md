@@ -207,11 +207,11 @@ curl -X POST "http://localhost:8081/api/dev/embed-all"      # 补齐未向量化
 ```
 demo/                      后端（Spring Boot）
   src/main/java/com/campus/rag/
-    controller/            7 个 Controller（30 接口）
+    controller/            9 个 Controller（33 接口）
     service/               检索、切分、解析、向量化、生成、评测、会话、认证
     config/                拦截器、全局异常、默认账号初始化
   src/main/resources/
-    db/schema.sql          建表脚本
+    db/schema.sql          建表脚本（新库初始化）
     db/migration-*.sql     结构变更（手工执行）
     static/index.html      早期单体调试页
 frontend/                  前端（Vue 3 + Vite）
