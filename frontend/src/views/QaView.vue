@@ -1030,11 +1030,17 @@ onMounted(async () => {
   font-size: 12px;
   padding: 0 4px;
 }
+/* 三档评价是主操作，不能做得像灰色小字：给边框 + 明确点击区域 */
 .foot-btn.fx {
-  opacity: 0.75;
+  opacity: 1;
+  padding: 2px 7px;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  background: #fafafa;
 }
 .foot-btn.fx:hover {
-  opacity: 1;
+  border-color: #c0c4cc;
+  background: #fff;
 }
 .foot-btn.fx.up {
   color: #529b2e;
@@ -1047,10 +1053,9 @@ onMounted(async () => {
 }
 /* 已选中的那一档加粗 + 底色，让"我评过这条"一眼可见 */
 .foot-btn.fx.active {
-  opacity: 1;
   font-weight: 600;
-  background: #f4f4f5;
-  border-radius: 4px;
+  background: #ecf5ff;
+  border-color: #b3d8ff;
 }
 .fb-tip {
   font-size: 12.5px;
