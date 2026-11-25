@@ -38,6 +38,11 @@ public class AgentLoop {
     private final AgentProperties props;
     private final ChatClient chatClient;
     private final ObjectMapper mapper;
+    /** 校内硬事实的粗判：数字带单位/期限，或出现处分等级与条款号。宁可多拦一次，也不要放过编造。 */
+    private static final java.util.regex.Pattern SCHOOL_FACT = java.util.regex.Pattern.compile(
+            "\\d+\\s*(个?月|天|日|学时|学分|元|%|％|分|年|次|条|章|节|工作日)"
+                    + "|警告|严重警告|记过|留校察看|开除学籍|不予毕业|不授学位|第[一二三四五六七八九十]+条");
+
     private final AgentDao dao;
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
     private final QaService qaService;
@@ -77,6 +82,7 @@ public class AgentLoop {
         String prevCall = null;
         int sameCount = 0;
         int parseRetried = 0;
+        boolean forcedSearch = false;
         int promptTokens = 0;
         int completionTokens = 0;
 
@@ -118,6 +124,24 @@ public class AgentLoop {
                         return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
                                 "final 但 final_answer 为空");
                     }
+                    if (evidence.isEmpty()) {
+                        // 没检索过就要作答：允许，但若答案里出现校内硬事实，先强制补一次检索核对
+                        if (claimsSchoolFact(answer) && !forcedSearch) {
+                            forcedSearch = true;
+                            log.info("Agent 未检索却出现校内硬事实，强制补一次 search_rules 核对");
+                            messages.add(msg("assistant", raw));
+                            messages.add(msg("user", "<system>你的回答里出现了校内具体事实（数字/期限/金额/处分/条款），"
+                                    + "但本轮没有检索过。请先调用 search_rules 核对原文，再给结论。</system>"));
+                            continue;
+                        }
+                        long costNoEvidence = System.currentTimeMillis() - begin;
+                        int totalNoEvidence = promptTokens + completionTokens;
+                        dao.finishRun(runId, "DONE", steps, costNoEvidence, totalNoEvidence, answer,
+                                joinIds(evidence), null);
+                        return new AgentResult(runId, "DONE", answer, evidence, steps, costNoEvidence,
+                                promptTokens, completionTokens,
+                                costYuan(promptTokens, completionTokens), null);
+                    }
                     List<Integer> bad = badCitations(answer, evidence.size());
                     if (!bad.isEmpty()) {
                         return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
@@ -128,13 +152,6 @@ public class AgentLoop {
                     dao.finishRun(runId, "DONE", steps, cost, total, answer, joinIds(evidence), null);
                     return new AgentResult(runId, "DONE", answer, evidence, steps, cost,
                             promptTokens, completionTokens, costYuan(promptTokens, completionTokens), null);
-                }
-
-                // 铁律 1：第一步必须检索
-                if (steps == 1 && !"search_rules".equals(action)) {
-                    log.info("Agent 第 1 步想调用 {}，强制改为 search_rules", action);
-                    action = "search_rules";
-                    args = Map.of("query", question, "topK", props.getDefaultTopK());
                 }
 
                 // 铁律 3：同工具同参防死循环
@@ -227,15 +244,27 @@ public class AgentLoop {
         return w;
     }
 
+    /** 答案里是否声称了"校内具体事实"（数字+单位、处分名、条款号）——用于无检索时强制补检索。 */
+    private boolean claimsSchoolFact(String answer) {
+        if (answer == null || answer.isBlank()) {
+            return false;
+        }
+        return SCHOOL_FACT.matcher(answer).find();
+    }
+
     private String systemPrompt() {
         StringBuilder sb = new StringBuilder();
-        sb.append("你是一个校园制度问答 Agent。你只能通过调用工具获取事实，不能凭记忆编造学校规定。\n");
+        sb.append("你是一个校园智能助手 Agent。你的本职是回答校园制度问题，但也能回答通用问题（编程、学习方法、概念解释、寒暄）。\n");
         sb.append("每一步只输出一个 JSON 对象，不要输出别的文字，不要用 markdown 代码块。\n\n");
         sb.append("输出格式（二选一）：\n");
         sb.append("1) 调工具：{\"thought\":\"为什么调这个工具\",\"action\":\"工具名\",\"action_input\":{...}}\n");
         sb.append("2) 给结论：{\"thought\":\"信息够了\",\"action\":\"final\",\"final_answer\":\"结论正文\"}\n\n");
         sb.append("规则：\n");
-        sb.append("- 第 1 步必须调用 search_rules 检索证据。\n");
+        sb.append("- 先判断问题是否需要「校内具体规定」：需要就先调 search_rules 再答；"
+                + "不需要（通用知识 / 概念解释 / 寒暄 / 学习建议）可以直接 final 作答。\n");
+        sb.append("- 直接作答时绝不编造校内具体数字、期限、金额、处分等级或条款号；"
+                + "涉及这些就必须先检索。\n");
+        sb.append("- 没检索就作答时，第一句要说明「以下不是校内规定，仅供参考」。\n");
         sb.append("- 引用编号 [n] 只能使用 <observation> 里出现过的序号，越界会被系统判为失败。\n");
         sb.append("- 信息不足以下结论时，直接说清楚还缺什么，不要猜。\n");
         sb.append("- 最多 ").append(props.getMaxSteps()).append(" 步。\n\n");
