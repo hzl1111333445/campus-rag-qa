@@ -7,6 +7,13 @@ import com.campus.rag.service.RetrievalService;
 import com.campus.rag.service.ContextAssembler;
 import com.campus.rag.service.SessionAccess;
 import com.campus.rag.service.SessionDao;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -88,12 +95,19 @@ public class QaController {
     }
 
     /** 请求体：{"question":"违纪处分有哪几种","topK":3,"sessionId":12} */
-    public record AskRequest(String question, Integer topK, Long sessionId) {
+    public record AskRequest(
+            @NotBlank(message = "不能为空")
+            @Size(max = 200, message = "最多 200 字")
+            String question,
+            @Min(value = 1, message = "至少 1 条")
+            @Max(value = 10, message = "最多 10 条")
+            Integer topK,
+            Long sessionId) {
     }
 
     @PostMapping
     public ResponseEntity<QaService.QaAnswer> ask(
-            @RequestBody AskRequest req,
+            @Valid @RequestBody AskRequest req,
             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
             @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role,
             @RequestHeader(value = "X-No-Persist", required = false) String noPersist,
@@ -166,7 +180,7 @@ public class QaController {
      */
     @PostMapping("/stream")
     public SseEmitter stream(
-            @RequestBody AskRequest req,
+            @Valid @RequestBody AskRequest req,
             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
             @RequestAttribute(value = AuthInterceptor.ATTR_ROLE, required = false) String role,
             @RequestHeader(value = "X-No-Persist", required = false) String noPersist,

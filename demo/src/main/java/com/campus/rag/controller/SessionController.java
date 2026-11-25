@@ -4,6 +4,8 @@ import com.campus.rag.config.AuthInterceptor;
 import com.campus.rag.service.AuthService;
 import com.campus.rag.service.SessionAccess;
 import com.campus.rag.service.SessionDao;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Size;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -49,11 +51,13 @@ public class SessionController {
     }
 
     /** 新建会话的请求体：{"title":"旷课处分"}，title 可以不给。 */
-    public record CreateRequest(String title) {
+    public record CreateRequest(
+            @Size(max = 100, message = "标题最多 100 字") String title) {
     }
 
     /** 重命名的请求体：{"title":"新名字"}。 */
-    public record RenameRequest(String title) {
+    public record RenameRequest(
+            @Size(max = 100, message = "标题最多 100 字") String title) {
     }
 
     /**
@@ -76,7 +80,7 @@ public class SessionController {
     }
 
     @PostMapping
-    public Map<String, Object> create(@RequestBody(required = false) CreateRequest req,
+    public Map<String, Object> create(@Valid @RequestBody(required = false) CreateRequest req,
                                       @RequestAttribute(AuthInterceptor.ATTR_USER_ID) long userId) {
         String title = req == null ? null : req.title();
         // 归属人 = 当前登录人，绝不从请求体里取 —— 请求体是可以伪造的
@@ -85,7 +89,7 @@ public class SessionController {
     }
 
     @PatchMapping("/{id}")
-    public Map<String, Object> rename(@PathVariable long id, @RequestBody RenameRequest req,
+    public Map<String, Object> rename(@PathVariable long id, @Valid @RequestBody RenameRequest req,
                                       @RequestAttribute(AuthInterceptor.ATTR_USER_ID) long userId,
                                       @RequestAttribute(AuthInterceptor.ATTR_ROLE) String role) {
         requireOwned(id, userId, role);

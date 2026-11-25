@@ -3,6 +3,10 @@ package com.campus.rag.controller;
 import com.campus.rag.service.AuthException;
 import com.campus.rag.service.AuthService;
 import com.campus.rag.service.TokenService;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
@@ -25,10 +29,31 @@ public class AuthController {
         this.tokenService = tokenService;
     }
 
+    /**
+     * 登录请求体。用户名/密码的格式不在这里判（判错密码是 401 不是 400），
+     * 只保证"不是空字符串"——空字符串连查库都不用查，属于参数错误。
+     */
+    public record LoginRequest(
+            @NotBlank(message = "不能为空") String username,
+            @NotBlank(message = "不能为空") String password) {
+    }
+
+    /** 注册请求体。用户名/密码规则与 AuthService 保持一致，这里先挡一层，库不用查。 */
+    public record RegisterRequest(
+            @NotBlank(message = "不能为空")
+            @Pattern(regexp = "[A-Za-z0-9_]{3,20}", message = "只能是 3~20 位字母/数字/下划线")
+            String username,
+            @NotBlank(message = "不能为空")
+            @Size(min = 6, max = 32, message = "长度需在 6~32 位之间")
+            String password,
+            @Size(max = 20, message = "最多 20 个字符")
+            String displayName) {
+    }
+
     /** 登录：POST /api/auth/login {"username":"admin","password":"admin123"} */
     @PostMapping("/login")
-    public Map<String, Object> login(@RequestBody Map<String, String> body) {
-        return authService.login(body.get("username"), body.get("password"));
+    public Map<String, Object> login(@Valid @RequestBody LoginRequest body) {
+        return authService.login(body.username(), body.password());
     }
 
     /**
@@ -38,8 +63,8 @@ public class AuthController {
      * 少一次登录输入，也避免"注册成功却登不上"的困惑。
      */
     @PostMapping("/register")
-    public Map<String, Object> register(@RequestBody Map<String, String> body) {
-        return authService.register(body.get("username"), body.get("password"), body.get("displayName"));
+    public Map<String, Object> register(@Valid @RequestBody RegisterRequest body) {
+        return authService.register(body.username(), body.password(), body.displayName());
     }
 
     /**

@@ -4,6 +4,11 @@ import com.campus.rag.config.AuthInterceptor;
 import com.campus.rag.service.AuthException;
 import com.campus.rag.service.AuthService;
 import com.campus.rag.service.FeedbackDao;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import com.campus.rag.service.ForbiddenException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -52,12 +57,23 @@ public class FeedbackController {
      * @param problems  缺陷多选（逗号分隔），level=2 时忽略
      * @param comment   补充说明，最多 200 字
      */
-    public record FeedbackRequest(Long messageId, Integer level, String problems, String comment) {
+    public record FeedbackRequest(
+            @NotNull(message = "不能为空")
+            @Min(value = 1, message = "必须为正整数")
+            Long messageId,
+            @NotNull(message = "不能为空")
+            @Min(value = 0, message = "只能是 0/1/2")
+            @Max(value = 2, message = "只能是 0/1/2")
+            Integer level,
+            @Size(max = 200, message = "最多 200 字")
+            String problems,
+            @Size(max = 200, message = "最多 200 字")
+            String comment) {
     }
 
     @PostMapping
     public Map<String, Object> submit(
-            @RequestBody FeedbackRequest req,
+            @Valid @RequestBody FeedbackRequest req,
             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId) {
 
         if (userId == null) {

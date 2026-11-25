@@ -8,6 +8,13 @@ import com.campus.rag.service.QaService;
 import com.campus.rag.service.ContextAssembler;
 import com.campus.rag.config.AgentProperties;
 import com.campus.rag.service.SessionDao;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,11 +61,18 @@ public class AgentController {
         this.documentDao = documentDao;
     }
 
-    public record ChatRequest(String question, Integer topK, Long sessionId) {
+    public record ChatRequest(
+            @NotBlank(message = "不能为空")
+            @Size(max = 200, message = "最多 200 字")
+            String question,
+            @Min(value = 1, message = "至少 1 条")
+            @Max(value = 10, message = "最多 10 条")
+            Integer topK,
+            Long sessionId) {
     }
 
     @PostMapping(value = "/chat", produces = MediaType.APPLICATION_JSON_VALUE)
-    public Map<String, Object> chat(@RequestBody ChatRequest req,
+    public Map<String, Object> chat(@Valid @RequestBody ChatRequest req,
                                     @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long userId,
                                     HttpServletRequest request) {
         if (req == null || req.question() == null || req.question().isBlank()) {

@@ -7,7 +7,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.FieldError;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.NoHandlerFoundException;
@@ -82,6 +86,36 @@ public class GlobalExceptionHandler {
     @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
     public ResponseEntity<Map<String, Object>> handleNotFound(Exception e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(body(404, "接口不存在"));
+    }
+
+    /**
+     * 请求体校验不通过（@Valid 触发）→ 400。
+     *
+     * <p>把每个字段的错误拼成一句话，前端可以直接展示：
+     * {"status":400,"message":"question 不能为空","errors":{"question":"不能为空"}}
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<Map<String, Object>> handleInvalidBody(MethodArgumentNotValidException e) {
+        Map<String, String> errors = new LinkedHashMap<>();
+        for (FieldError fe : e.getBindingResult().getFieldErrors()) {
+            errors.putIfAbsent(fe.getField(), fe.getDefaultMessage());
+        }
+        String first = errors.isEmpty() ? "请求参数不合法" : errors.keySet().iterator().next() + " " + errors.values().iterator().next();
+        Map<String, Object> body = body(400, first);
+        body.put("errors", errors);
+        return ResponseEntity.badRequest().body(body);
+    }
+
+    /** 请求体不是合法 JSON / 类型不对（比如 topK 传了 "abc"）→ 400，别报成 500 */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, Object>> handleUnreadable(HttpMessageNotReadableException e) {
+        return ResponseEntity.badRequest().body(body(400, "请求体不是合法 JSON，或字段类型不对"));
+    }
+
+    /** 必填的 query 参数缺失 → 400 */
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<Map<String, Object>> handleMissingParam(MissingServletRequestParameterException e) {
+        return ResponseEntity.badRequest().body(body(400, "缺少必填参数：" + e.getParameterName()));
     }
 
     /** 兜底 → 500，并且把堆栈打进日志（前端只看到一句话，方便排查又不泄露内部细节） */

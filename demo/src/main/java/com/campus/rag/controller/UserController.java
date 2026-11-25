@@ -3,6 +3,12 @@ package com.campus.rag.controller;
 import com.campus.rag.config.AuthInterceptor;
 import com.campus.rag.service.AuthService;
 import com.campus.rag.service.UserDao;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -75,15 +81,27 @@ public class UserController {
         return data;
     }
 
+    /** 启停请求体：{"status":0}，只收 0/1。 */
+    public record StatusRequest(
+            @NotNull(message = "不能为空")
+            @Min(value = 0, message = "只能是 0 或 1")
+            @Max(value = 1, message = "只能是 0 或 1")
+            Integer status) {
+    }
+
+    /** 重置密码请求体：{"password":"新密码"}。 */
+    public record PasswordRequest(
+            @NotBlank(message = "不能为空")
+            @Size(min = 6, max = 32, message = "长度需在 6~32 位之间")
+            String password) {
+    }
+
     /** 启用 / 停用：PATCH /api/user/{id}/status {"status":0} */
     @PatchMapping("/{id}/status")
     public Map<String, Object> updateStatus(@PathVariable long id,
-                                            @RequestBody Map<String, Object> body,
+                                            @Valid @RequestBody StatusRequest body,
                                             @RequestAttribute(value = AuthInterceptor.ATTR_USER_ID, required = false) Long selfId) {
-        int status = toInt(body.get("status"), -1);
-        if (status != 0 && status != 1) {
-            throw new IllegalArgumentException("status 只能是 1（启用）或 0（停用）");
-        }
+        int status = body.status();
         Map<String, Object> user = userDao.findById(id);
         if (user == null) {
             throw new IllegalArgumentException("用户不存在：" + id);
@@ -108,9 +126,8 @@ public class UserController {
 
     /** 重置密码：POST /api/user/{id}/reset-password {"password":"新密码"} */
     @PostMapping("/{id}/reset-password")
-    public Map<String, Object> resetPassword(@PathVariable long id, @RequestBody Map<String, Object> body) {
-        String password = body.get("password") == null ? null : String.valueOf(body.get("password"));
-        authService.resetPassword(id, password);
+    public Map<String, Object> resetPassword(@PathVariable long id, @Valid @RequestBody PasswordRequest body) {
+        authService.resetPassword(id, body.password());
         log.info("管理员重置密码：id={}", id);
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("id", id);
