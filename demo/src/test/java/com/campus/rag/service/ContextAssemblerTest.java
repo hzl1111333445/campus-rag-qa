@@ -50,15 +50,19 @@ class ContextAssemblerTest {
     }
 
     @Test
-    @DisplayName("单条超长要截断，并留省略号")
+    @DisplayName("单条超长要截断：头 60% + 尾 40%，中间省略号（2026-11-25 修正）")
     void truncatesLongMessage() {
-        String longText = "啊".repeat(300);
+        // 头尾用不同字符，才能验证"两边都留了"
+        String longText = "头".repeat(200) + "尾".repeat(100);
         List<Map<String, Object>> rows = List.of(msg("assistant", longText));
 
         List<ContextAssembler.Turn> history = assembler(3, 120, 600).assemble(rows);
 
-        assertEquals(121, history.get(0).content().length(), "120 字 + 省略号");
-        assertTrue(history.get(0).content().endsWith("…"));
+        String got = history.get(0).content();
+        assertEquals(121, got.length(), "120 字 + 省略号");
+        assertTrue(got.contains("…"), "中间要有省略号");
+        assertTrue(got.startsWith("头"), "开头要保留");
+        assertTrue(got.endsWith("尾"), "结尾要保留（这是 2026-11-25 修掉的真实降质点）");
     }
 
     @Test

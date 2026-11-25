@@ -84,8 +84,20 @@ campus:
   context:                                    # 多轮对话：带多少历史（由 ContextAssembler 读取）
     enabled: ${CONTEXT_ENABLED:true}          # 关掉就退回单轮行为，用于对比
     turns: ${CONTEXT_TURNS:3}                 # 带最近几轮（1 轮 = 问 + 答）
-    max-chars-per-msg: ${CONTEXT_MAX_CHARS_PER_MSG:120}   # 单条历史截断长度
+    max-chars-per-msg: ${CONTEXT_MAX_CHARS_PER_MSG:120}   # 单条历史截断长度（头 60% + 尾 40%）
     max-total-chars: ${CONTEXT_MAX_TOTAL_CHARS:600}       # 历史总字数上限，防止历史挤掉【资料】
+    summary:                                  # 长会话记忆：更早的对话压成结构化摘要（ContextBudget 读取）
+      enabled: ${CONTEXT_SUMMARY_ENABLED:false}          # 默认关；开着才折叠，关掉 = 老行为（可做 A/B）
+      window-tokens: ${CONTEXT_SUMMARY_WINDOW_TOKENS:1200}
+      trigger-pct: ${CONTEXT_SUMMARY_TRIGGER_PCT:0.60}    # 达到 60% 窗口才考虑折叠
+      emergency-pct: ${CONTEXT_SUMMARY_EMERGENCY_PCT:0.90} # 到 90% 立刻折（不看增长量）
+      growth-tokens: ${CONTEXT_SUMMARY_GROWTH_TOKENS:300} # 距上次折叠增长不足就别折
+      keep-recent-turns: ${CONTEXT_SUMMARY_KEEP_TURNS:5}   # 保护带：最近 3 轮永远留原文
+      keep-recent-tokens: ${CONTEXT_SUMMARY_KEEP_TOKENS:600}
+      max-chars: ${CONTEXT_SUMMARY_MAX_CHARS:240}         # 摘要段渲染上限
+      min-messages: ${CONTEXT_SUMMARY_MIN_MESSAGES:10}     # 少于 10 条消息不折（5 轮）
+      min-fold-chars: ${CONTEXT_SUMMARY_MIN_FOLD_CHARS:300}
+      max-segment-chars: ${CONTEXT_SUMMARY_MAX_SEGMENT_CHARS:6000}
   # ---------- 缓存（Redis，见 docs/25-缓存与限流.md）----------
   # 三件事：问答结果缓存、embedding 缓存、接口限流。
   # 全部可用环境变量关闭：CACHE_ENABLED=false 就退回"每次都真算"的老行为，

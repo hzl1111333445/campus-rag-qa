@@ -7,6 +7,7 @@ import com.campus.rag.service.RetrievalService;
 import com.campus.rag.service.ContextAssembler;
 import com.campus.rag.service.SessionAccess;
 import com.campus.rag.service.SessionDao;
+import com.campus.rag.service.SummaryService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -86,14 +87,19 @@ public class QaController {
     private final ContextAssembler contextAssembler;
     private final ObjectMapper objectMapper;
     private final com.campus.rag.service.BusinessMetrics metrics;
+    /** 长会话记忆：把更早的对话压成摘要（可为 null 时由 Spring 注入）。 */
+    private final SummaryService summaryService;
 
     public QaController(QaService qaService, SessionDao sessionDao,
-                        ContextAssembler contextAssembler, ObjectMapper objectMapper, com.campus.rag.service.BusinessMetrics metrics) {
+                        ContextAssembler contextAssembler, ObjectMapper objectMapper,
+                        com.campus.rag.service.BusinessMetrics metrics,
+                        SummaryService summaryService) {
         this.metrics = metrics;
         this.qaService = qaService;
         this.sessionDao = sessionDao;
         this.contextAssembler = contextAssembler;
         this.objectMapper = objectMapper;
+        this.summaryService = summaryService;
     }
 
     /** 请求体：{"question":"违纪处分有哪几种","topK":3,"sessionId":12} */
@@ -166,6 +172,8 @@ public class QaController {
         } catch (Exception e) {
             log.warn("保存会话消息失败 sessionId={}: {}", sessionId, e.toString());
         }
+        // 长会话记忆：把更早的对话压成摘要。异步、失败不影响回答。
+        summaryService.foldAsync(sessionId);
 
         return ResponseEntity.ok()
                 .header("X-Session-Id", String.valueOf(sessionId))
@@ -303,10 +311,12 @@ public class QaController {
         try {
             sessionDao.insertMessage(sessionId, "user", question,
                     false, null, null, null, null, null, null, null);
-            return sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
+            long id = sessionDao.insertMessage(sessionId, "assistant", answer.answer(),
                     answer.gated(), answer.citationOk(), answer.grounded(), answer.factCount(),
                     answer.topScore(), answer.elapsedMs(), toJson(answer.references()),
                     joinFacts(answer.missingFacts()));
+            summaryService.foldAsync(sessionId);   // 流式路径同样触发长会话折叠
+            return id;
         } catch (Exception e) {
             log.warn("保存会话消息失败 sessionId={}: {}", sessionId, e.toString());
             return 0L;

@@ -95,6 +95,26 @@ public class PromptBuilder {
         }
         sb.append('\n');
 
+        // 更早对话的摘要：放在【资料】之前，因为它是"背景"，不是事实来源。
+        // 位置很关键——放在资料之后，模型容易把摘要里的说法当资料引用。
+        String summary = null;
+        List<ContextAssembler.Turn> dialog = new ArrayList<>();
+        if (history != null) {
+            for (ContextAssembler.Turn t : history) {
+                if ("summary".equals(t.role())) {
+                    summary = t.content();
+                } else {
+                    dialog.add(t);
+                }
+            }
+        }
+        if (summary != null && !summary.isBlank()) {
+            sb.append("【更早对话的摘要】（帮你理解上下文，不是资料：");
+            sb.append("不得作为回答依据，不得出现在引用编号里；涉及规定的部分必须重新按【资料】回答。");
+            sb.append("**摘要里记的是用户自己说过的情况；没写进摘要的，一律当作'用户没说过'**）\n");
+            sb.append(summary).append('\n').append('\n');
+        }
+
         sb.append("【资料】\n");
         for (int i = 0; i < hits.size(); i++) {
             RetrievalService.Hit h = hits.get(i);
@@ -105,10 +125,11 @@ public class PromptBuilder {
         }
 
         // 多轮：历史只用来理解"这句话在问什么"，不提供事实
-        if (history != null && !history.isEmpty()) {
+        if (!dialog.isEmpty()) {
             sb.append("【对话历史】（只用来理解当前问题指的是什么；历史里助手说过的话不算资料，");
-            sb.append("不得作为依据，也不得出现在引用编号里）\n");
-            for (ContextAssembler.Turn t : history) {
+            sb.append("不得作为依据，也不得出现在引用编号里。");
+            sb.append("**用户问过什么 ≠ 用户自己是什么情况**：不要因为前面问过某件事，就说'你有这种情况'）\n");
+            for (ContextAssembler.Turn t : dialog) {
                 sb.append("assistant".equals(t.role()) ? "助手：" : "用户：").append(t.content()).append('\n');
             }
             sb.append('\n');

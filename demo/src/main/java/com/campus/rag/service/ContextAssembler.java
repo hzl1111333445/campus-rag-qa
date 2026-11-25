@@ -1,5 +1,6 @@
 package com.campus.rag.service;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -31,7 +32,9 @@ import java.util.Map;
 @Component
 public class ContextAssembler {
 
-    /** 一条历史消息，role 只会是 user 或 assistant。 */
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ContextAssembler.class);
+
+    /** 一条历史消息，role 只会是 user 或 assistant；role=summary 表示"更早对话的摘要"。 */
     public record Turn(String role, String content) {
     }
 
@@ -40,26 +43,62 @@ public class ContextAssembler {
     private final int maxCharsPerMsg;
     private final int maxTotalChars;
 
+    /**
+     * 是否把"助手的回答"也放进历史。
+     *
+     * <p>默认 <b>false</b>：2026-11-25 实测发现助手会把历史里自己说过的话当成"用户的情况"
+     * 复述（同一句"你上学期有作弊记录"连续出现两次），自我强化比丢上下文更危险。
+     * 需要时可以 CONTEXT_INCLUDE_ASSISTANT=true 打开，用同一套评测对比。
+     */
+    private final boolean includeAssistant;
+
+    /** 长会话摘要（可为 null：单测里不注入）。 */
+    private final SummaryService summaryService;
+
+    @Autowired
     public ContextAssembler(
             @Value("${campus.context.enabled:true}") boolean enabled,
             @Value("${campus.context.turns:3}") int turns,
             @Value("${campus.context.max-chars-per-msg:120}") int maxCharsPerMsg,
-            @Value("${campus.context.max-total-chars:600}") int maxTotalChars) {
+            @Value("${campus.context.max-total-chars:600}") int maxTotalChars,
+            @Value("${campus.context.include-assistant:false}") boolean includeAssistant,
+            SummaryService summaryService) {
         this.enabled = enabled;
         this.turns = Math.max(0, turns);
         this.maxCharsPerMsg = Math.max(20, maxCharsPerMsg);
         this.maxTotalChars = Math.max(100, maxTotalChars);
+        this.includeAssistant = includeAssistant;
+        this.summaryService = summaryService;
+    }
+
+    /** 单测用的 4 参构造：不带摘要。 */
+    ContextAssembler(boolean enabled, int turns, int maxCharsPerMsg, int maxTotalChars) {
+        this(enabled, turns, maxCharsPerMsg, maxTotalChars, true, null);
     }
 
     /**
      * 从库里读这个会话的历史（不含本次提问——调用方要在把本次提问入库之前调）。
+     *
+     * <p>返回值可能以一条 {@code role=summary} 的"伪消息"开头：那是更早对话的要点摘要。
+     * 用同一个列表承载，是为了让所有调用点（问答同步/流式/调试预览/Agent）不用改签名。
      */
     public List<Turn> load(SessionDao sessionDao, long sessionId) {
         if (!enabled) {
             return List.of();
         }
-        List<Map<String, Object>> rows = sessionDao.listMessages(sessionId);
-        return assemble(rows);
+        List<Turn> dialog = assemble(sessionDao.listMessages(sessionId));
+        if (summaryService == null) {
+            return dialog;
+        }
+        String summary = summaryService.render(sessionId);
+        if (summary == null || summary.isBlank()) {
+            return dialog;
+        }
+        List<Turn> out = new ArrayList<>(dialog.size() + 1);
+        out.add(new Turn("summary", summary));
+        out.addAll(dialog);
+        log.debug("注入会话摘要 sessionId={} 摘要={}字 原文{}条", sessionId, summary.length(), dialog.size());
+        return List.copyOf(out);
     }
 
     /**
@@ -71,7 +110,7 @@ public class ContextAssembler {
         if (rows == null || rows.isEmpty() || turns <= 0) {
             return List.of();
         }
-        int maxMsgs = turns * 2;   // 一轮 = 问 + 答
+        int maxMsgs = includeAssistant ? turns * 2 : turns;   // 一轮 = 问 + 答；只要问就一条一轮
         List<Turn> picked = new ArrayList<>(maxMsgs);
         int used = 0;
 
@@ -79,12 +118,15 @@ public class ContextAssembler {
         for (int i = rows.size() - 1; i >= 0 && picked.size() < maxMsgs; i--) {
             Map<String, Object> row = rows.get(i);
             String role = String.valueOf(row.getOrDefault("role", "user"));
+            if (!includeAssistant && !"user".equals(role)) {
+                continue;   // 只要用户问过什么，不要助手说过什么（防自我强化）
+            }
             String content = stripCitations(oneLine(row.get("content")));
             if (content.isEmpty()) {
                 continue;
             }
             if (content.length() > maxCharsPerMsg) {
-                content = content.substring(0, maxCharsPerMsg) + "…";
+                content = clip(content, maxCharsPerMsg);
             }
             // 预算不够就整条不要，不要半条——半条历史比没有更误导
             if (used + content.length() > maxTotalChars) {
@@ -96,6 +138,25 @@ public class ContextAssembler {
 
         Collections.reverse(picked);   // 恢复成"时间正序"，模型读起来才自然
         return List.copyOf(picked);
+    }
+
+    /**
+     * 单条截断：<b>头 60% + 尾 40%</b>，中间用省略号。
+     *
+     * <p>为什么不能只留头（2026-11-25 修）：实测 81 条助手回答里 **57% 超过 120 字**，
+     * 而我们的回答格式是"先结论 + 分条说明 + 最后一句兜底/建议"，期限、处分档位、
+     * "具体以某部门为准"这类关键信息经常落在后半段。只截头等于系统性丢掉结论尾部。
+     *
+     * <p>为什么不各留 50%：开头包含"结论 + 第 1 条"，信息密度更高；
+     * 尾部只需要兜住最后一句的条件/建议，40% 足够。
+     */
+    static String clip(String content, int max) {
+        if (content == null || content.length() <= max) {
+            return content;
+        }
+        int head = (int) Math.round(max * 0.6);
+        int tail = Math.max(1, max - head);
+        return content.substring(0, head) + "…" + content.substring(content.length() - tail);
     }
 
     /**
