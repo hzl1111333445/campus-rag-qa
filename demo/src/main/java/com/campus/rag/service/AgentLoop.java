@@ -57,7 +57,12 @@ public class AgentLoop {
     /** 执行结果（给 Controller 用）。 */
     public record AgentResult(long runId, String status, String answer,
                               List<Long> allowedChunks, int steps, long totalMs,
-                              int tokenEst, String error) {
+                              int promptTokens, int completionTokens, double costYuan,
+                              String error) {
+
+        public int totalTokens() {
+            return promptTokens + completionTokens;
+        }
     }
 
     public AgentResult run(String question, int topK, Long sessionId, Long userId) {
@@ -72,11 +77,26 @@ public class AgentLoop {
         String prevCall = null;
         int sameCount = 0;
         int parseRetried = 0;
+        int promptTokens = 0;
+        int completionTokens = 0;
 
         try {
             while (steps < props.getMaxSteps()) {
                 steps++;
-                String raw = chatClient.chat(messages);
+
+                // 预算铁律：先预判这一步的 prompt，超了就不再问（宁降级也不烧钱）
+                int used = promptTokens + completionTokens;
+                int projected = ChatClient.estimateMessages(window(messages));
+                if (used + projected > props.getMaxTotalTokens()) {
+                    return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
+                            "token 预算不足（已用 " + used + "，下一步预计 " + projected
+                                    + "，上限 " + props.getMaxTotalTokens() + "）");
+                }
+
+                ChatClient.ChatResult call = chatClient.chatWithUsage(window(messages));
+                promptTokens += call.promptTokens();
+                completionTokens += call.completionTokens();
+                String raw = call.content();
                 JsonNode node = parseJson(raw);
                 if (node == null) {
                     if (parseRetried++ == 0) {
@@ -84,7 +104,8 @@ public class AgentLoop {
                         messages.add(msg("user", "你的输出不是合法 JSON。请只输出 JSON，不要解释、不要 markdown 代码块。"));
                         continue;
                     }
-                    return degrade(runId, question, topK, steps, begin, "模型输出不是合法 JSON");
+                    return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
+                            "模型输出不是合法 JSON");
                 }
 
                 String thought = node.path("thought").asText("");
@@ -94,18 +115,19 @@ public class AgentLoop {
                 if ("final".equals(action)) {
                     String answer = node.path("final_answer").asText("");
                     if (answer.isBlank()) {
-                        return degrade(runId, question, topK, steps, begin, "final 但 final_answer 为空");
+                        return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
+                                "final 但 final_answer 为空");
                     }
                     List<Integer> bad = badCitations(answer, evidence.size());
                     if (!bad.isEmpty()) {
-                        return degrade(runId, question, topK, steps, begin,
+                        return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
                                 "引用编号越界 " + bad + "（本轮只有 " + evidence.size() + " 条证据）");
                     }
                     long cost = System.currentTimeMillis() - begin;
-                    dao.finishRun(runId, "DONE", steps, cost, estimateTokens(messages), answer,
-                            joinIds(evidence), null);
+                    int total = promptTokens + completionTokens;
+                    dao.finishRun(runId, "DONE", steps, cost, total, answer, joinIds(evidence), null);
                     return new AgentResult(runId, "DONE", answer, evidence, steps, cost,
-                            estimateTokens(messages), null);
+                            promptTokens, completionTokens, costYuan(promptTokens, completionTokens), null);
                 }
 
                 // 铁律 1：第一步必须检索
@@ -124,7 +146,8 @@ public class AgentLoop {
                     prevCall = callKey;
                 }
                 if (sameCount > props.getMaxSameCall()) {
-                    return degrade(runId, question, topK, steps, begin, "同一调用重复超过 " + props.getMaxSameCall() + " 次");
+                    return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
+                            "同一调用重复超过 " + props.getMaxSameCall() + " 次");
                 }
 
                 AgentTool tool = tools.get(action);
@@ -152,25 +175,56 @@ public class AgentLoop {
                 messages.add(msg("assistant", raw));
                 messages.add(msg("user", "<observation tool=\"" + action + "\">" + observation + "</observation>"));
             }
-            return degrade(runId, question, topK, steps, begin, "超过最大步数 " + props.getMaxSteps());
+            return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens,
+                    "超过最大步数 " + props.getMaxSteps());
         } catch (RuntimeException e) {
             log.warn("Agent 循环异常：{}", e.toString());
-            return degrade(runId, question, topK, steps, begin, e.toString());
+            return degrade(runId, question, topK, steps, begin, promptTokens, completionTokens, e.toString());
         }
     }
 
     /** 降级：走固定管线，保证"至少不至于没有答案"。 */
-    private AgentResult degrade(long runId, String question, int topK, int steps, long begin, String reason) {
+    private AgentResult degrade(long runId, String question, int topK, int steps, long begin,
+                                int promptTokens, int completionTokens, String reason) {
         long cost = System.currentTimeMillis() - begin;
+        int total = promptTokens + completionTokens;
+        double yuan = costYuan(promptTokens, completionTokens);
         try {
             QaService.QaAnswer answer = qaService.ask(question, topK);
-            dao.finishRun(runId, "DEGRADED", steps, cost, 0, answer.answer(), null, reason);
-            log.info("Agent 降级回固定管线：{}", reason);
-            return new AgentResult(runId, "DEGRADED", answer.answer(), List.of(), steps, cost, 0, reason);
+            dao.finishRun(runId, "DEGRADED", steps, cost, total, answer.answer(), null, reason);
+            log.info("Agent 降级回固定管线：{}（已用 {} token，≈{} 元）", reason, total, yuan);
+            return new AgentResult(runId, "DEGRADED", answer.answer(), List.of(), steps, cost,
+                    promptTokens, completionTokens, yuan, reason);
         } catch (RuntimeException e) {
-            dao.finishRun(runId, "FAILED", steps, cost, 0, null, null, reason + " / 降级也失败：" + e);
-            return new AgentResult(runId, "FAILED", null, List.of(), steps, cost, 0, reason);
+            dao.finishRun(runId, "FAILED", steps, cost, total, null, null,
+                    reason + " / 降级也失败：" + e);
+            return new AgentResult(runId, "FAILED", null, List.of(), steps, cost,
+                    promptTokens, completionTokens, yuan, reason);
         }
+    }
+
+    /** 花费估算（元）。价格来自 campus.agent.price-*，默认值为示例价，不是账单。 */
+    private double costYuan(int promptTokens, int completionTokens) {
+        double in = promptTokens / 1_000_000d * props.getPriceInputPerMillion();
+        double out = completionTokens / 1_000_000d * props.getPriceOutputPerMillion();
+        return Math.round((in + out) * 1_000_000d) / 1_000_000d;
+    }
+
+    /**
+     * 滑动窗口：只保留 system + 原始提问 + 最近 4 条消息。
+     *
+     * <p>为什么必须裁：每步都会追加 assistant(JSON) 与 observation，6 步就能把 prompt 撑到上万 token；
+     * 裁掉中间步骤会损失上下文，所以只保留最近两步的观察，且 observation 本身已截断到 800 字。
+     */
+    private List<Map<String, String>> window(List<Map<String, String>> messages) {
+        if (messages.size() <= 8) {
+            return messages;
+        }
+        List<Map<String, String>> w = new ArrayList<>(6);
+        w.add(messages.get(0));
+        w.add(messages.get(1));
+        w.addAll(messages.subList(messages.size() - 4, messages.size()));
+        return w;
     }
 
     private String systemPrompt() {

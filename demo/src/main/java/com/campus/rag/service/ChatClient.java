@@ -76,11 +76,31 @@ public class ChatClient {
     }
 
     /**
-     * 发一组消息，拿回模型生成的文字。
+     * 发一组消息，拿回模型生成的文字（不带用量）。
      *
      * @param messages 形如 [{role:"system",content:"你是..."},{role:"user",content:"资料...提问..."}]
      */
     public String chat(List<Map<String, String>> messages) {
+        return chatWithUsage(messages).content();
+    }
+
+    /**
+     * 一次对话的结果：正文 + 用量。
+     *
+     * <p>用量优先取上游返回的 {@code usage}（DeepSeek/OpenAI 兼容格式都有）；
+     * 上游没给时按"中文 1 字 ≈ 0.7 token"粗估，并在日志里标注，避免把估算当账。
+     */
+    public record ChatResult(String content, int promptTokens, int completionTokens, boolean estimated) {
+
+        public int totalTokens() {
+            return promptTokens + completionTokens;
+        }
+    }
+
+    /**
+     * 发一组消息，拿回正文与用量。Agent 循环用它记账、控预算。
+     */
+    public ChatResult chatWithUsage(List<Map<String, String>> messages) {
         if (props.getApiKey() == null || props.getApiKey().isBlank()) {
             throw new IllegalStateException("campus.llm.api-key 是空的，请在 application-local.yml 里填 DeepSeek 的 key");
         }
@@ -108,8 +128,52 @@ public class ChatClient {
             throw new IllegalStateException("大模型返回了空结果");
         }
         String content = resp.choices().get(0).message().content();
-        log.debug("大模型返回 {} 字，模型 {}", content == null ? 0 : content.length(), props.getModel());
-        return content == null ? "" : content;
+        String text = content == null ? "" : content;
+
+        int promptTokens;
+        int completionTokens;
+        boolean estimated;
+        if (resp.usage() != null && resp.usage().prompt_tokens() != null
+                && resp.usage().completion_tokens() != null) {
+            promptTokens = resp.usage().prompt_tokens();
+            completionTokens = resp.usage().completion_tokens();
+            estimated = false;
+        } else {
+            promptTokens = estimateMessages(messages);
+            completionTokens = estimate(text);
+            estimated = true;
+            log.debug("上游未返回 usage，按字数估算 prompt={} completion={}", promptTokens, completionTokens);
+        }
+        log.debug("大模型返回 {} 字、{} token（估算={}），模型 {}",
+                text.length(), promptTokens + completionTokens, estimated, props.getModel());
+        return new ChatResult(text, promptTokens, completionTokens, estimated);
+    }
+
+    /** 粗估：中文 1 字约 0.7 token，代码/英文约 0.3 token/字符；只用于"没给 usage 时的兜底"和预算预判。 */
+    public static int estimate(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int ascii = 0;
+        int cjk = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c < 128) {
+                ascii++;
+            } else {
+                cjk++;
+            }
+        }
+        return (int) Math.ceil(cjk * 0.7 + ascii * 0.3);
+    }
+
+    /** 估算一组消息的 prompt token（供 Agent 预算预判）。 */
+    public static int estimateMessages(List<Map<String, String>> messages) {
+        int sum = 0;
+        for (Map<String, String> m : messages) {
+            sum += estimate(m.get("content")) + 4;   // 每条消息的角色/分隔符约 4 token
+        }
+        return sum;
     }
 
     /**
@@ -244,7 +308,11 @@ public class ChatClient {
     // ==================== 接口返回的数据结构 ====================
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    record ChatResponse(List<Choice> choices) {
+    record ChatResponse(List<Choice> choices, Usage usage) {
+
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        record Usage(Integer prompt_tokens, Integer completion_tokens) {
+        }
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

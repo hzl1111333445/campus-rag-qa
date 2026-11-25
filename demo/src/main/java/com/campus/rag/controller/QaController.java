@@ -220,6 +220,10 @@ public class QaController {
 
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("answer", answer);
+            done.put("promptTokens", answer.promptTokens());
+            done.put("completionTokens", answer.completionTokens());
+            done.put("totalTokens", answer.totalTokens());
+            done.put("costYuan", answer.costYuan());
             done.put("messageId", messageId);
             long ttft = firstTokenAt.get() > 0 ? firstTokenAt.get() - begin : 0;
             done.put("ttftMs", ttft);

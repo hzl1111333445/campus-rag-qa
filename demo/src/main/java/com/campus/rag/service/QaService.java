@@ -113,7 +113,17 @@ public class QaService {
                            String standaloneQuestion,
                            long elapsedMs,
                            /** 是否来自缓存（true 时 elapsedMs 只包含查缓存的时间） */
-                           boolean cached) {
+                           boolean cached,
+                           /** prompt token（缓存命中 / 检索层拒答时为 0，这是真实值） */
+                           int promptTokens,
+                           /** completion token */
+                           int completionTokens,
+                           /** 本次花费估算（元）；流式路径按字数估算 */
+                           double costYuan) {
+
+        public int totalTokens() {
+            return promptTokens + completionTokens;
+        }
     }
 
     /**
@@ -162,6 +172,7 @@ public class QaService {
         // 两段式（默认关闭）：①先只摘原句 ②再只用原句组答案。详见 docs/16。
         int evidenceCount = 0;
         String answer;
+        int[] usage = new int[2];   // 0=prompt, 1=completion
         if (llmProperties.isTwoStage()) {
             List<PromptBuilder.Quote> quotes = extractQuotes(question, hits);
             evidenceCount = quotes.size();
@@ -169,17 +180,17 @@ public class QaService {
                 // 第一步一条都没摘到：可能是资料确实不相关，也可能模型输出格式坏了。
                 // 这种情况退回单段式，保证系统不会因为"第一步失败"而答不了。
                 log.info("两段式第一步没摘出证据，回退单段式生成");
-                answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
+                answer = generate(promptBuilder.buildMessages(question, hits, history), usage);
             } else {
                 log.debug("两段式：摘到 {} 条原句，用它组答案", quotes.size());
-                answer = chatClient.chat(promptBuilder.buildAnswerMessagesFromQuotes(question, quotes, hits));
+                answer = generate(promptBuilder.buildAnswerMessagesFromQuotes(question, quotes, hits), usage);
             }
         } else {
-            answer = chatClient.chat(promptBuilder.buildMessages(question, hits, history));
+            answer = generate(promptBuilder.buildMessages(question, hits, history), usage);
         }
 
         Validated validated = validate(answer, hits);
-        QaAnswer result = build(question, answer, hits, prepared, validated, evidenceCount, begin);
+        QaAnswer result = build(question, answer, hits, prepared, validated, evidenceCount, begin, usage);
         if (history == null || history.isEmpty()) {
             putCache(question, topK, result);
         }
@@ -223,9 +234,15 @@ public class QaService {
             log.info("两段式开启时流式路径仍按单段式生成（两段式第一步要等完整 JSON，没有流式可给）");
         }
 
-        String answer = chatClient.chatStream(promptBuilder.buildMessages(question, hits, history), onToken);
+        List<Map<String, String>> streamMessages = promptBuilder.buildMessages(question, hits, history);
+        String answer = chatClient.chatStream(streamMessages, onToken);
         Validated validated = validate(answer, hits);
-        return build(question, answer, hits, prepared, validated, 0, begin);
+        // 流式拿不到上游 usage（流里只有 delta），按字数估算，前端会把这条标成"≈"
+        int[] estimated = new int[]{
+                ChatClient.estimateMessages(streamMessages),
+                ChatClient.estimate(answer)
+        };
+        return build(question, answer, hits, prepared, validated, 0, begin, estimated);
     }
 
     // ======================= 缓存 =======================
@@ -275,7 +292,8 @@ public class QaService {
             return new QaAnswer(cached.question(), cached.answer(), cached.model(), cached.references(),
                     cached.retrievedCount(), cached.citationOk(), cached.invalidCitations(),
                     cached.grounded(), cached.factCount(), cached.missingFacts(), cached.topScore(),
-                    cached.gated(), cached.evidenceCount(), cached.standaloneQuestion(), cost, true);
+                    cached.gated(), cached.evidenceCount(), cached.standaloneQuestion(), cost, true,
+                    0, 0, 0.0);
         } catch (Exception e) {
             log.warn("缓存内容解析失败，按未命中处理：{}", e.getMessage());
             return null;
@@ -344,7 +362,7 @@ public class QaService {
                     "本知识库暂未收录与该问题相关的规定，建议咨询学校相关职能部门或查看学校官网。",
                     chatClient.model(), List.of(), 0, true, List.of(),
                     true, 0, List.of(), 0.0, true, 0, standaloneQuestion,
-                    System.currentTimeMillis() - begin, false));
+                    System.currentTimeMillis() - begin, false, 0, 0, 0.0));
         }
 
         // 检索分数低于阈值：资料太不相关，问了模型也只能编 → 在检索层就拒答
@@ -356,7 +374,7 @@ public class QaService {
                             + "你可以换一种问法重试，也可以直接咨询学校相关职能部门。",
                     chatClient.model(), List.of(), best.hits().size(), true, List.of(),
                     true, 0, List.of(), best.topScore(), true, 0, standaloneQuestion,
-                    System.currentTimeMillis() - begin, false));
+                    System.currentTimeMillis() - begin, false, 0, 0, 0.0));
         }
         return new Prepared(best, standaloneQuestion, null);
     }
@@ -414,12 +432,31 @@ public class QaService {
 
     /** 把 16 个字段拼成一个 QaAnswer（两条路径共用，避免字段顺序写错） */
     private QaAnswer build(String question, String answer, List<RetrievalService.Hit> hits,
-                           Prepared prepared, Validated validated, int evidenceCount, long begin) {
+                           Prepared prepared, Validated validated, int evidenceCount, long begin,
+                           int[] usage) {
         AnswerGuard.Check guard = validated.guard();
+        int promptTokens = usage == null ? 0 : usage[0];
+        int completionTokens = usage == null ? 0 : usage[1];
         return new QaAnswer(question, answer, chatClient.model(), validated.references(), hits.size(),
                 validated.citationOk(), validated.invalid(), guard.missing().isEmpty(),
                 guard.factCount(), guard.missing(), prepared.best().topScore(), false,
-                evidenceCount, prepared.standaloneQuestion(), System.currentTimeMillis() - begin, false);
+                evidenceCount, prepared.standaloneQuestion(), System.currentTimeMillis() - begin, false,
+                promptTokens, completionTokens, costYuan(promptTokens, completionTokens));
+    }
+
+    /** 生成一次并累计用量。缓存命中与检索层拒答都到不了这里，所以那些路径记 0 token 是真实的。 */
+    private String generate(List<Map<String, String>> messages, int[] usage) {
+        ChatClient.ChatResult r = chatClient.chatWithUsage(messages);
+        usage[0] += r.promptTokens();
+        usage[1] += r.completionTokens();
+        return r.content();
+    }
+
+    /** 花费估算（元）。单价来自 campus.llm.price-*，默认只是示例价，不是账单。 */
+    private double costYuan(int promptTokens, int completionTokens) {
+        double in = promptTokens / 1_000_000d * llmProperties.getPriceInputPerMillion();
+        double out = completionTokens / 1_000_000d * llmProperties.getPriceOutputPerMillion();
+        return Math.round((in + out) * 1_000_000d) / 1_000_000d;
     }
 
     /** 检索阶段的结果：earlyAnswer 不为 null 表示"检索层就决定了不生成" */

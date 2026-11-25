@@ -36,6 +36,12 @@ public class LlmProperties {
     /** 超时秒数。模型偶尔会慢，给 60 秒 */
     private int timeoutSeconds = 60;
 
+    /** 输入单价（元 / 百万 token）。默认是示例价，请按模型官网现价改；只用于"本次花费≈"展示。 */
+    private double priceInputPerMillion = 2.0;
+
+    /** 输出单价（元 / 百万 token）。 */
+    private double priceOutputPerMillion = 8.0;
+
     /**
      * 是否启用"两段式生成"：①先让模型只摘原句 ②再让它只用这些原句组答案。
      *
@@ -99,5 +105,21 @@ public class LlmProperties {
 
     public void setTimeoutSeconds(int timeoutSeconds) {
         this.timeoutSeconds = timeoutSeconds;
+    }
+
+    public double getPriceInputPerMillion() {
+        return priceInputPerMillion;
+    }
+
+    public void setPriceInputPerMillion(double priceInputPerMillion) {
+        this.priceInputPerMillion = priceInputPerMillion;
+    }
+
+    public double getPriceOutputPerMillion() {
+        return priceOutputPerMillion;
+    }
+
+    public void setPriceOutputPerMillion(double priceOutputPerMillion) {
+        this.priceOutputPerMillion = priceOutputPerMillion;
     }
 }

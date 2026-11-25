@@ -286,6 +286,11 @@ async function streamAsk(q, replyId) {
           stage: '',
           ttftMs: data.ttftMs,
           totalMs: data.totalMs,
+          // 用量与花费：同步接口精确（上游 usage），流式是估算（前端标 ≈）
+          promptTokens: data.promptTokens,
+          completionTokens: data.completionTokens,
+          totalTokens: data.totalTokens,
+          costYuan: data.costYuan,
           // 拒答题没有 token，答案在 done.answer 里；messageId 用于提交赞/踩
           data: { ...data.answer, messageId: data.messageId }
         })
@@ -392,6 +397,23 @@ function paragraphs(text) {
 function docTitle(t) {
   // 文件名前缀带序号（如「11-广州软件学院学生考勤管理制度」），展示时去掉，避免像编号乱码
   return (t || '').replace(/^\s*\d+[-_—\s]+/, '')
+}
+
+/** 花费展示：小于 0.001 元时用 6 位小数，否则 4 位；没有数据就不显示。 */
+function costText(m) {
+  const c = m.data?.costYuan
+  if (c === undefined || c === null) return ''
+  const v = Number(c)
+  if (!v) return ''
+  return (v < 0.001 ? v.toFixed(6) : v.toFixed(4))
+}
+
+/** 用量展示：1200 → 1.2k。同步接口只有分项（totalTokens 是计算属性，不进 JSON），所以要自己加。 */
+function tokenText(m) {
+  const d = m.data || {}
+  const t = d.totalTokens || (d.promptTokens || 0) + (d.completionTokens || 0)
+  if (!t) return ''
+  return t >= 1000 ? (t / 1000).toFixed(1) + 'k token' : t + ' token'
 }
 
 function scoreText(v) {
@@ -587,7 +609,7 @@ onMounted(async () => {
               </div>
 
               <div class="answer-foot">
-                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms<template v-if="m.ttftMs"> · 首字 {{ m.ttftMs }} ms</template></span>
+                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms<template v-if="m.ttftMs"> · 首字 {{ m.ttftMs }} ms</template><template v-if="costText(m)"> · ≈ ¥{{ costText(m) }}<template v-if="tokenText(m)">（{{ tokenText(m) }}）</template></template></span>
                 <span class="foot-actions">
                   <button
                     v-for="lv in [2, 1, 0]"
