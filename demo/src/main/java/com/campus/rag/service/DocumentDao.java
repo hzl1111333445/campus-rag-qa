@@ -6,10 +6,11 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.sql.PreparedStatement;
+import java.sql.Types;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import static javax.swing.DropMode.ON;
 
 @Repository
 public class DocumentDao {
@@ -20,21 +21,36 @@ public class DocumentDao {
         this.jdbc = jdbc;
     }
 
-    /** 插入一条记录，返回自增 id。 */
+    /** 插入一条记录（不带内容指纹）。保留旧签名，避免所有调用点都要改。 */
     public long insert(String originalName, String storedName, String fileType, long fileSize) {
+        return insert(originalName, storedName, fileType, fileSize, null);
+    }
+
+    /**
+     * 插入一条记录，并把「内容指纹」一起写进去。
+     *
+     * <p>file_hash 是文件内容的 SHA-256：同一个文件换个名字再传，靠它认出来，
+     * 不重复入库、不重复烧 embedding 的钱。
+     */
+    public long insert(String originalName, String storedName, String fileType, long fileSize, String fileHash) {
         String title = originalName.replaceFirst("(?i)\\.[^.]+$", "");   // 去掉 .pdf 当标题
 
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbc.update(con -> {
             PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO kb_document(title, original_name, stored_name, file_type, file_size, status) " +
-                            "VALUES (?, ?, ?, ?, ?, 0)",
+                    "INSERT INTO kb_document(title, original_name, stored_name, file_type, file_hash, file_size, status) " +
+                            "VALUES (?, ?, ?, ?, ?, ?, 0)",
                     new String[]{"id"});
             ps.setString(1, title);
             ps.setString(2, originalName);
             ps.setString(3, storedName);
             ps.setString(4, fileType);
-            ps.setLong(5, fileSize);
+            if (fileHash == null) {
+                ps.setNull(5, Types.CHAR);
+            } else {
+                ps.setString(5, fileHash);
+            }
+            ps.setLong(6, fileSize);
             return ps;
         }, keyHolder);
         return keyHolder.getKey().longValue();
@@ -108,6 +124,46 @@ public class DocumentDao {
     public void insertChunk(long documentId, int chunkIndex, String content) {
         jdbc.update("INSERT INTO kb_chunk(document_id, chunk_index, content, char_count) VALUES (?, ?, ?, ?)",
                 documentId, chunkIndex, content, content.length());
+    }
+
+    /**
+     * 按内容指纹找已入库的文档。返回 null 表示没传过。
+     *
+     * <p>只找通过校验的记录：如果上次入库失败（status=3），允许用户重传覆盖。
+     */
+    public Map<String, Object> findByHash(String fileHash) {
+        if (fileHash == null || fileHash.isBlank()) {
+            return null;
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id, title, original_name, chunk_count, status FROM kb_document " +
+                        "WHERE file_hash = ? AND status = 2 ORDER BY id DESC LIMIT 1", fileHash);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    /**
+     * 批量插入块：643 块从 643 次往返降到 1 次。
+     *
+     * <p>用 {@code jdbc.batchUpdate} 而不是拼超长 SQL：占位符数量有上限（默认 65535），
+     * 643 块 × 4 列 = 2572 个占位符，块数一多就会炸。
+     */
+    public void insertChunkBatch(long documentId, List<String> chunks) {
+        if (chunks == null || chunks.isEmpty()) {
+            return;
+        }
+        List<Object[]> args = new ArrayList<>(chunks.size());
+        for (int i = 0; i < chunks.size(); i++) {
+            String content = chunks.get(i);
+            args.add(new Object[]{documentId, i, content, content == null ? 0 : content.length()});
+        }
+        jdbc.batchUpdate(
+                "INSERT INTO kb_chunk(document_id, chunk_index, content, char_count) VALUES (?, ?, ?, ?)",
+                args);
+    }
+
+    /** 失败时把重试次数 +1（给运维看"这个文件试过几次"）。 */
+    public void increaseRetry(long documentId) {
+        jdbc.update("UPDATE kb_document SET retry_count = retry_count + 1 WHERE id = ?", documentId);
     }
 
     /** 查某个文档的块，按顺序。limit 防止一次拉太多。 */

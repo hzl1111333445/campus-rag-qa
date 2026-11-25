@@ -15,14 +15,18 @@ CREATE TABLE IF NOT EXISTS kb_document (
     original_name VARCHAR(255)    NOT NULL                COMMENT '用户上传时的原始文件名',
     stored_name   VARCHAR(100)    NOT NULL                COMMENT '磁盘上的文件名（UUID.ext）',
     file_type     VARCHAR(20)     NOT NULL                COMMENT '扩展名：pdf/docx/txt',
+    file_hash     CHAR(64)        NULL                    COMMENT '文件内容 SHA-256：同一个文件不重复入库',
     file_size     BIGINT          NOT NULL                COMMENT '字节数',
     status        TINYINT         NOT NULL DEFAULT 0      COMMENT '0待处理 1处理中 2成功 3失败',
     chunk_count   INT             NOT NULL DEFAULT 0      COMMENT '切成多少个块',
     fail_reason   VARCHAR(500)    NULL                    COMMENT '失败原因，给用户看的',
+    retry_count   TINYINT         NOT NULL DEFAULT 0      COMMENT '失败重试次数',
     create_time   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time   DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uk_stored_name (stored_name),
-    KEY idx_status (status)
+    KEY idx_status (status),
+    KEY idx_file_hash (file_hash)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '知识库文档';
 
 -- 会话表：一个"对话"= 一行。标题默认取第一句提问的前 20 个字，用户可以改名。

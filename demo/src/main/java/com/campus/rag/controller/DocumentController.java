@@ -39,6 +39,20 @@ public class DocumentController {
         String originalName = file.getOriginalFilename();
         byte[] bytes = file.getBytes();
 
+        // 第 0 步：算内容指纹，先判重。
+        // 为什么用内容 hash 而不是文件名：同一份文件改名再传是常事，按名字判重会漏。
+        String fileHash = sha256Hex(bytes);
+        Map<String, Object> existing = documentDao.findByHash(fileHash);
+        if (existing != null) {
+            Map<String, Object> dup = new LinkedHashMap<>();
+            dup.put("duplicate", true);
+            dup.put("id", existing.get("id"));
+            dup.put("originalName", existing.get("original_name"));
+            dup.put("chunkCount", existing.get("chunk_count"));
+            dup.put("message", "这个文件之前已经入库过（内容完全一致），直接复用，没有重复切分和向量化");
+            return dup;
+        }
+
         // 第一步：存盘（文件本体）
         String storedName = storage.save(originalName, bytes);
 
@@ -46,7 +60,7 @@ public class DocumentController {
         String fileType = dot >= 0 ? originalName.substring(dot + 1).toLowerCase() : "unknown";
 
         // 第二步：入库一条文档记录（状态 0 = 待处理）
-        long id = documentDao.insert(originalName, storedName, fileType, file.getSize());
+        long id = documentDao.insert(originalName, storedName, fileType, file.getSize(), fileHash);
 
         // 第三步：解析 → 切分 → 把块写进 kb_chunk（失败会标状态 3，不抛异常）
         long begin = System.currentTimeMillis();
@@ -185,5 +199,22 @@ public class DocumentController {
         data.put("deleted", deleted);
         data.put("fileRemoved", fileRemoved);
         return data;
+    }
+
+    /** 文件内容 SHA-256（十六进制小写）。用内容而不是文件名做幂等键。 */
+    private static String sha256Hex(byte[] bytes) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(bytes);
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 是 JDK 必备算法，理论上不会发生；真发生就让上传失败，而不是静默跳过幂等
+            throw new IllegalStateException("当前 JDK 不支持 SHA-256", e);
+        }
     }
 }

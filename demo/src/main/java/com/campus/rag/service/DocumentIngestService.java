@@ -30,14 +30,19 @@ public class DocumentIngestService {
     /** 相邻块重叠字符数。 */
     private final int chunkOverlap;
 
+    /** 只负责"写库这一小段"的原子操作（@Transactional 在它身上，才能被代理到）。 */
+    private final DocumentChunkWriter chunkWriter;
+
     public DocumentIngestService(DocumentParser parser,
                                  DocumentDao documentDao,
                                  DocumentStorage storage,
                                  ChunkEnricher chunkEnricher,
+                                 DocumentChunkWriter chunkWriter,
                                  @Value("${campus.split.size:220}") int chunkSize,
                                  @Value("${campus.split.overlap:50}") int chunkOverlap) {
         this.parser = parser;
         this.documentDao = documentDao;
+        this.chunkWriter = chunkWriter;
         this.storage = storage;
         this.chunkEnricher = chunkEnricher;
         this.chunkSize = chunkSize;
@@ -83,14 +88,10 @@ public class DocumentIngestService {
             String title = titleOf(documentId, fileName);
             chunks = chunkEnricher.enrich(title, chunks);
 
-            // 先删旧块再插新块：这样同一个文件重复上传/重新切分不会留垃圾
-            documentDao.deleteChunks(documentId);
-
-            for (int i = 0; i < chunks.size(); i++) {
-                documentDao.insertChunk(documentId, i, chunks.get(i));
-            }
-
-            documentDao.updateStatus(documentId, 2, chunks.size(), null);
+            // 写库这一小段是原子的：删旧块 + 批量插新块 + 更新状态，要么全成、要么一块不动。
+            // 为什么把解析/切分留在事务外：11 份扫描件解析要秒级，放事务里会长时间持锁；
+            // 而且 @Transactional 必须由外部 bean 调用才生效（同类自调不代理）。
+            chunkWriter.replaceChunks(documentId, chunks);
 
             System.out.printf("[ingest] 文档 %d 处理完成：%d 字 → %d 块（size=%d, overlap=%d），耗时 %d ms%n",
                     documentId, text.length(), chunks.size(), chunkSize, chunkOverlap,
@@ -102,7 +103,8 @@ public class DocumentIngestService {
             if (reason.length() > 480) {
                 reason = reason.substring(0, 480);   // 字段是 varchar(500)，截断防止插入失败
             }
-            documentDao.updateStatus(documentId, 3, 0, reason);
+            // 上一个事务已回滚；失败状态 + 重试次数用独立事务写，否则用户会永远看到"处理中"
+            chunkWriter.markFailed(documentId, reason);
             System.out.println("[ingest] 文档 " + documentId + " 处理失败：" + reason);
             return 0;
         }
