@@ -39,6 +39,10 @@ public class CacheService {
     private final int qaTtlJitterSeconds;
     private final int embeddingTtlSeconds;
 
+    /** 可选注入：指标是"锦上添花"，用 @Autowired(required=false) 避免测试里 new 的时候麻烦 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private BusinessMetrics metrics;
+
     private final AtomicLong hits = new AtomicLong();
     private final AtomicLong misses = new AtomicLong();
     private final AtomicLong writes = new AtomicLong();
@@ -92,8 +96,14 @@ public class CacheService {
             String value = redis.opsForValue().get(key);
             if (value == null) {
                 misses.incrementAndGet();
+                if (metrics != null) {
+                    metrics.cacheAccess(false);
+                }
             } else {
                 hits.incrementAndGet();
+                if (metrics != null) {
+                    metrics.cacheAccess(true);
+                }
             }
             return value;
         } catch (Exception e) {

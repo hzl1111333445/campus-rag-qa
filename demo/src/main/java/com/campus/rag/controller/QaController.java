@@ -85,9 +85,11 @@ public class QaController {
     private final SessionDao sessionDao;
     private final ContextAssembler contextAssembler;
     private final ObjectMapper objectMapper;
+    private final com.campus.rag.service.BusinessMetrics metrics;
 
     public QaController(QaService qaService, SessionDao sessionDao,
-                        ContextAssembler contextAssembler, ObjectMapper objectMapper) {
+                        ContextAssembler contextAssembler, ObjectMapper objectMapper, com.campus.rag.service.BusinessMetrics metrics) {
+        this.metrics = metrics;
         this.qaService = qaService;
         this.sessionDao = sessionDao;
         this.contextAssembler = contextAssembler;
@@ -125,6 +127,10 @@ public class QaController {
                 && (noPersist.equals("1") || noPersist.equalsIgnoreCase("true"));
         if (noPersistFlag) {
             QaService.QaAnswer plain = qaService.ask(question, topK, List.of());
+            metrics.qaFinished("sync", plain.gated(), plain.cached(), plain.elapsedMs(), plain.totalTokens());
+            if (plain.gated()) {
+                metrics.qaRefused("retrieval");
+            }
             return ResponseEntity.ok()
                     .header("X-Persisted", "none")
                     .body(plain);
@@ -138,6 +144,10 @@ public class QaController {
         List<ContextAssembler.Turn> history = contextAssembler.load(sessionDao, sessionId);
 
         QaService.QaAnswer answer = qaService.ask(question, topK, history);
+        metrics.qaFinished("sync", answer.gated(), answer.cached(), answer.elapsedMs(), answer.totalTokens());
+        if (answer.gated()) {
+            metrics.qaRefused("retrieval");
+        }
 
         // 存消息。存失败不影响本次回答——问答是主线，记账是副线，副线出错只记日志。
         long messageId = 0L;
@@ -230,7 +240,11 @@ public class QaController {
                     });
 
             // 先落库再发 done：前端要拿到 messageId 才能提交反馈（差几毫秒，值得）
-            long messageId = persist ? saveMessages(sessionId, question, answer) : 0L;
+            metrics.qaFinished("stream", answer.gated(), answer.cached(), answer.elapsedMs(), answer.totalTokens());
+        if (answer.gated()) {
+            metrics.qaRefused("retrieval");
+        }
+        long messageId = persist ? saveMessages(sessionId, question, answer) : 0L;
 
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("answer", answer);

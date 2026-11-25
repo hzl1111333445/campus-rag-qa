@@ -30,6 +30,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+
+        <!-- 指标与健康检查：/actuator/health 公开，/actuator/prometheus 仅管理员 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
         <dependency>
             <!-- 参数校验：@Valid + jakarta.validation 注解，缺它 @Valid 不生效 -->
             <groupId>org.springframework.boot</groupId>

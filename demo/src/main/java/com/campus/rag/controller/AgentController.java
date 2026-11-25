@@ -51,14 +51,17 @@ public class AgentController {
     private final SessionDao sessionDao;
     private final ContextAssembler contextAssembler;
     private final DocumentDao documentDao;
+    private final com.campus.rag.service.BusinessMetrics businessMetrics;
 
     public AgentController(AgentLoop agentLoop, AgentProperties props, SessionDao sessionDao,
-                           ContextAssembler contextAssembler, DocumentDao documentDao) {
+                           ContextAssembler contextAssembler, DocumentDao documentDao,
+                           com.campus.rag.service.BusinessMetrics businessMetrics) {
         this.agentLoop = agentLoop;
         this.props = props;
         this.sessionDao = sessionDao;
         this.contextAssembler = contextAssembler;
         this.documentDao = documentDao;
+        this.businessMetrics = businessMetrics;
     }
 
     public record ChatRequest(
@@ -103,6 +106,7 @@ public class AgentController {
         log.info("Agent 请求：user={} session={} history={} q={}",
                 userId, sessionId, history.size(), question);
         AgentLoop.AgentResult r = agentLoop.run(question, topK, sessionId, userId, history);
+        businessMetrics.agentFinished(r.status(), r.steps());
 
         // 落库：下一轮的历史就从这里来。失败不阻断回答（问答是主线，记账是副线）
         try {

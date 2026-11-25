@@ -142,3 +142,17 @@ campus:
 logging:
   level:
     com.campus.rag: debug      # 自己包的日志打详细点，方便看程序走到哪一步
+
+# 指标与健康检查：只暴露 health/info/metrics/prometheus
+# /actuator/prometheus 由 ActuatorGuardInterceptor 收成"仅管理员"，/actuator/health 保持公开
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: never
+  metrics:
+    tags:
+      app: campus-rag
