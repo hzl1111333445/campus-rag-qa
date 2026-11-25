@@ -321,6 +321,22 @@ public class AgentLoop {
         }
     }
 
+    /** 回答里引用到的编号（用于"只核被引块"的接地校验）。 */
+    public static List<Integer> citedIndexes(String answer) {
+        List<Integer> idx = new ArrayList<>();
+        if (answer == null || answer.isEmpty()) {
+            return idx;
+        }
+        Matcher m = CITATION.matcher(answer);
+        while (m.find()) {
+            int n = Integer.parseInt(m.group(1));
+            if (!idx.contains(n)) {
+                idx.add(n);
+            }
+        }
+        return idx;
+    }
+
     public static List<Integer> badCitations(String answer, int size) {
         List<Integer> bad = new ArrayList<>();
         Matcher m = CITATION.matcher(answer);

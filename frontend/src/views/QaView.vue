@@ -235,7 +235,7 @@ async function agentAsk(q, replyId) {
     streamText: '',
     data: {
       answer: d.answer || '',
-      references: [],          // Agent 返回的是 chunkId 列表，不是完整引用对象，出处先不展示
+      references: d.references || [],      // Agent 现在也回传"文档名 + 块号 + 正文"
       retrievedCount: (d.allowedChunks || []).length,
       topScore: null,
       elapsedMs: d.totalMs,
@@ -243,9 +243,11 @@ async function agentAsk(q, replyId) {
       promptTokens: d.promptTokens,
       completionTokens: d.completionTokens,
       costYuan: d.costYuan,
-      citationOk: null,
-      grounded: null,
-      factCount: 0,
+      citationOk: d.citationOk,
+      invalidCitations: [],
+      grounded: d.grounded,
+      factCount: d.factCount || 0,
+      missingFacts: d.missingFacts || [],
       gated: false,
       agentMode: true,
       badCitationCount: d.badCitationCount,
@@ -492,7 +494,7 @@ function citeTag(data) {
   if (data.agentMode) {
     const bad = Number(data.badCitationCount) || 0
     if (bad) return { type: 'danger', text: `引用编号越界（${bad} 处）` }
-    return data.agentSearched
+    return (data.references || []).length
       ? { type: 'success', text: '引用校验通过' }
       : { type: 'info', text: '未引用资料' }
   }
@@ -504,7 +506,6 @@ function citeTag(data) {
 }
 
 function groundedTag(data) {
-  if (data.agentMode) return { type: 'info', text: 'Agent 模式未做接地校验' }
   if (!data.grounded) return { type: 'danger', text: '接地校验未通过' }
   if (!data.factCount) return { type: 'info', text: '无可核对硬事实' }
   return { type: 'success', text: `接地通过 · 核了 ${data.factCount} 条` }

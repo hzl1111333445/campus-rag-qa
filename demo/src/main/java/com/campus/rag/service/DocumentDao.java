@@ -117,6 +117,36 @@ public class DocumentDao {
                         "ORDER BY chunk_index LIMIT ?", documentId, limit);
     }
 
+    /** 引用回显用：按 chunkId 批量取"文档名 + 块号 + 正文"。 */
+    public record ChunkDetail(long id, long documentId, String documentTitle, int chunkIndex, String content) {
+    }
+
+    /**
+     * 按 id 批量取块详情。
+     *
+     * <p>只在 Agent 模式下用（把 allowedChunks 换成可展示的出处），
+     * 所以不做全表扫描——IN 里最多十几个 id。
+     */
+    public List<ChunkDetail> findChunksByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        StringBuilder in = new StringBuilder();
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) in.append(',');
+            in.append('?');
+        }
+        String sql = "SELECT c.id, c.document_id, d.title, c.chunk_index, c.content "
+                + "FROM kb_chunk c JOIN kb_document d ON d.id = c.document_id "
+                + "WHERE c.id IN (" + in + ")";
+        return jdbc.query(sql, (rs, i) -> new ChunkDetail(
+                rs.getLong("id"),
+                rs.getLong("document_id"),
+                rs.getString("title"),
+                rs.getInt("chunk_index"),
+                rs.getString("content")), ids.toArray());
+    }
+
     public long countChunks() {
         Long n = jdbc.queryForObject("SELECT COUNT(*) FROM kb_chunk", Long.class);
         return n == null ? 0 : n;
