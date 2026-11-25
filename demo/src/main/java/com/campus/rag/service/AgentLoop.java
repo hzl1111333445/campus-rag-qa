@@ -70,12 +70,22 @@ public class AgentLoop {
         }
     }
 
-    public AgentResult run(String question, int topK, Long sessionId, Long userId) {
+    public AgentResult run(String question, int topK, Long sessionId, Long userId,
+                           List<ContextAssembler.Turn> history) {
         long begin = System.currentTimeMillis();
         long runId = dao.createRun(sessionId, userId, question);
         List<Long> evidence = new ArrayList<>();
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(msg("system", systemPrompt()));
+        if (history != null && !history.isEmpty()) {
+            // 历史只用来理解指代，不能当证据：否则上一轮查到的块会被当成本轮依据，引用校验也失去意义
+            StringBuilder h = new StringBuilder("<history note=\"只用于理解指代，不能作为事实依据；本轮结论必须靠本轮工具返回的证据\">\n");
+            for (ContextAssembler.Turn t : history) {
+                h.append(t.role()).append("：").append(t.content()).append("\n");
+            }
+            h.append("</history>");
+            messages.add(msg("user", h.toString()));
+        }
         messages.add(msg("user", "<question>" + question + "</question>"));
 
         int steps = 0;

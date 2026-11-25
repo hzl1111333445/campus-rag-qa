@@ -2,6 +2,7 @@ package com.campus.rag.controller;
 
 import com.campus.rag.config.AuthInterceptor;
 import com.campus.rag.service.AgentLoop;
+import com.campus.rag.service.ContextAssembler;
 import com.campus.rag.config.AgentProperties;
 import com.campus.rag.service.SessionDao;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -36,11 +38,14 @@ public class AgentController {
     private final AgentLoop agentLoop;
     private final AgentProperties props;
     private final SessionDao sessionDao;
+    private final ContextAssembler contextAssembler;
 
-    public AgentController(AgentLoop agentLoop, AgentProperties props, SessionDao sessionDao) {
+    public AgentController(AgentLoop agentLoop, AgentProperties props, SessionDao sessionDao,
+                           ContextAssembler contextAssembler) {
         this.agentLoop = agentLoop;
         this.props = props;
         this.sessionDao = sessionDao;
+        this.contextAssembler = contextAssembler;
     }
 
     public record ChatRequest(String question, Integer topK, Long sessionId) {
@@ -68,11 +73,29 @@ public class AgentController {
         Long sessionId = req.sessionId() != null && sessionDao.findById(req.sessionId()) != null
                 ? req.sessionId() : null;
 
-        log.info("Agent 请求：user={} session={} q={}", userId, sessionId, question);
-        AgentLoop.AgentResult r = agentLoop.run(question, topK, sessionId, userId);
+        // 没有会话就建一个：多轮需要历史，历史需要 sessionId 落库
+        if (sessionId == null) {
+            String title = question.length() > 20 ? question.substring(0, 20) + "…" : question;
+            sessionId = sessionDao.create(title, userId);
+        }
+        List<ContextAssembler.Turn> history = contextAssembler.load(sessionDao, sessionId);
+
+        log.info("Agent 请求：user={} session={} history={} q={}",
+                userId, sessionId, history.size(), question);
+        AgentLoop.AgentResult r = agentLoop.run(question, topK, sessionId, userId, history);
+
+        // 落库：下一轮的历史就从这里来。失败不阻断回答（问答是主线，记账是副线）
+        try {
+            sessionDao.insertMessage(sessionId, "user", question, false, null, null, null, null, null, null, null);
+            sessionDao.insertMessage(sessionId, "assistant", r.answer(),
+                    false, null, null, null, null, null, null, null);
+        } catch (RuntimeException e) {
+            log.warn("Agent 会话落库失败（不影响回答）：{}", e.toString());
+        }
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("runId", r.runId());
+        body.put("sessionId", sessionId);
         body.put("status", r.status());
         body.put("answer", r.answer());
         body.put("steps", r.steps());
