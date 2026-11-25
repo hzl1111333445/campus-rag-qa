@@ -303,9 +303,17 @@ async function streamAsk(q, replyId) {
   }
 }
 
+/**
+ * 键盘发送策略：**Enter 只换行，Ctrl（Mac 为 Cmd）+ Enter 才发送**。
+ *
+ * <p>为什么不按常规「Enter 发送」：中文输入法里回车常被用来确认候选词，
+ * 浏览器同样会派发 keydown Enter，`isComposing` 在部分输入法/浏览器组合下还是 false，
+ * 结果就是"字还没打完，它自己发出去了"（用户实测：敲任何键都可能触发）。
+ * 与其和输入法做兼容，不如把发送键显式改成组合键——行为确定，不依赖 IME 事件。
+ */
 function onEnter(e) {
-  // Enter 发送、Shift+Enter 换行
-  if (e.shiftKey) return
+  if (e.key !== 'Enter') return
+  if (!(e.ctrlKey || e.metaKey)) return      // 普通回车交回默认行为（换行）
   e.preventDefault()
   send()
 }
@@ -636,7 +644,7 @@ onMounted(async () => {
             :autosize="{ minRows: 1, maxRows: 5 }"
             resize="none"
             maxlength="200"
-            placeholder="用大白话问，例如：旷课多少学时会被处分？（Enter 发送 / Shift + Enter 换行）"
+            placeholder="用大白话问，例如：旷课多少学时会被处分？（Ctrl + Enter 发送，Enter 换行）"
             @keydown="onEnter"
           />
           <el-button
