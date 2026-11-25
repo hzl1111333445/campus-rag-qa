@@ -39,6 +39,7 @@ public class QaService {
     private final QueryRewriter queryRewriter;
     private final ObjectMapper objectMapper;
     private final CacheService cacheService;
+    private final QueryDecomposer queryDecomposer;
 
     /**
      * 追问补全的触发阈值：按原句检索的最高分低于它，才认为"这句话自己检索不明白"，
@@ -54,7 +55,8 @@ public class QaService {
                      QueryRewriter queryRewriter,
                      @Value("${campus.context.followup-trigger-score:0.30}") double followupTriggerScore,
                      ObjectMapper objectMapper,
-                     CacheService cacheService) {
+                     CacheService cacheService,
+                     QueryDecomposer queryDecomposer) {
         this.retrievalService = retrievalService;
         this.promptBuilder = promptBuilder;
         this.chatClient = chatClient;
@@ -63,6 +65,7 @@ public class QaService {
         this.followupTriggerScore = followupTriggerScore;
         this.objectMapper = objectMapper;
         this.cacheService = cacheService;
+        this.queryDecomposer = queryDecomposer;
     }
 
     /**
@@ -326,7 +329,13 @@ public class QaService {
                 }
             }
         } else {
-            best = retrievalService.searchBestGated(question, topK);
+            // 单轮对话：先看这句话是不是"一句话塞了两个意图"。
+            // 是的话拆成几个子问题各查一遍再合并——这比上 ReAct 便宜（只多一次轻量调用），
+            // 也不会影响单跳问题的路径：拆不出东西时 decompose() 只返回原句。
+            List<String> subQueries = queryDecomposer.decompose(question);
+            best = subQueries.size() > 1
+                    ? retrievalService.searchMulti(subQueries, topK)
+                    : retrievalService.searchBestGated(question, topK);
         }
 
         // 一条都没检索到：连资料都没有，直接拒答（不花钱）

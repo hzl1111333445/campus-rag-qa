@@ -602,6 +602,42 @@ public class RetrievalService {
                 rewrittenText != null, rewrittenText);
     }
 
+    /**
+     * 多查询检索：把"一个复合问题拆出来的几个子问题"各查一遍，再合并证据。
+     *
+     * <p><b>为什么要合并而不是各答一遍</b>：多跳问题的答案往往需要"A 文件的条件 + B 文件的后果"，
+     * 分两次生成会出现自相矛盾的两段话；合并成一批证据、生成一次，模型才能做交叉对照。
+     *
+     * <p><b>合并规则</b>：同一块被多个子问题命中时保留高分（`max`），按分数降序、
+     * 同分按 chunkId 升序（保证可复现），最多留 `max(topK, 5)` 块
+     * ——子问题越多证据越多，但上下文不能无限膨胀，5 块是实测下"够用且不稀释"的量。
+     */
+    public Best searchMulti(List<String> queries, int topK) {
+        boolean reranked = rerankClient.available();
+        Map<Long, Hit> bestByChunk = new LinkedHashMap<>();
+        for (String q : queries) {
+            Prepared p = prepare(q);
+            List<Hit> ranked = reranked
+                    ? rerankedHits(p, topK, true)
+                    : buildHits(p, topK, SearchMode.HYBRID, true);
+            for (Hit h : expandHits(p, ranked)) {
+                bestByChunk.merge(h.chunkId(), h, (a, b) -> a.score() >= b.score() ? a : b);
+            }
+        }
+        List<Hit> merged = new ArrayList<>(bestByChunk.values());
+        merged.sort(Comparator.comparingDouble(Hit::score).reversed()
+                .thenComparingLong(Hit::chunkId));
+        int cap = Math.max(topK, 5);
+        if (merged.size() > cap) {
+            merged = new ArrayList<>(merged.subList(0, cap));
+        }
+        double topScore = merged.isEmpty() ? 0.0 : merged.get(0).score();
+        double threshold = reranked ? minScoreRerank : minScoreHybrid;
+        boolean gated = threshold > 0 && topScore < threshold;
+        log.info("多查询检索：{} 路查询 → 合并后 {} 块，最高分 {}", queries.size(), merged.size(), topScore);
+        return new Best(merged, topScore, reranked, threshold, gated, false, null);
+    }
+
     /** 直接走"混合 + 精排"两阶段（给搜索接口用） */
     public List<Hit> searchReranked(String question, int topK) {
         return rerankedHits(prepare(question), topK, true);

@@ -65,6 +65,11 @@ campus:
     enabled: ${REWRITE_ENABLED:false}          # 默认关；关掉时检索行为与之前完全一致
     timeout-seconds: ${REWRITE_TIMEOUT_SECONDS:8}
     cache-size: ${REWRITE_CACHE_SIZE:500}      # 同一问句第二次改写 0 成本
+  # 查询分解：把"一句话两个意图"的复合问题拆成几个子问题各检索一遍再合并。
+  # 默认关：开启后会多一次轻量模型调用（约 +0.3s），单跳问题用不上。
+  decompose:
+    enabled: ${DECOMPOSE_ENABLED:false}
+    max-queries: ${DECOMPOSE_MAX_QUERIES:3}
   context:                                    # 多轮对话：带多少历史（由 ContextAssembler 读取）
     enabled: ${CONTEXT_ENABLED:true}          # 关掉就退回单轮行为，用于对比
     turns: ${CONTEXT_TURNS:3}                 # 带最近几轮（1 轮 = 问 + 答）
