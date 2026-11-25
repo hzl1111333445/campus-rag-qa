@@ -32,6 +32,17 @@ public class AuthController {
     }
 
     /**
+     * 注册：POST /api/auth/register {"username":"zhangsan","password":"123456","displayName":"张三"}
+     *
+     * <p>只允许注册成学生（角色不接受前端传参），并且注册成功就直接返回 token——
+     * 少一次登录输入，也避免"注册成功却登不上"的困惑。
+     */
+    @PostMapping("/register")
+    public Map<String, Object> register(@RequestBody Map<String, String> body) {
+        return authService.register(body.get("username"), body.get("password"), body.get("displayName"));
+    }
+
+    /**
      * 当前登录人是谁 —— 前端刷新页面后用它把用户信息"捞回来"，
      * 免得只靠 localStorage 里那份可能过期的副本。
      */

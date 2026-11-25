@@ -38,7 +38,9 @@ public class AuthInterceptor implements HandlerInterceptor {
             "/api/dev",
             "/api/eval",
             // 检索调试接口会暴露内部分数、改写句与阈值，属于"调参工具"，不对学生开放
-            "/api/search"
+            "/api/search",
+            // 用户管理：看用户列表、停用账号、重置密码，只有管理员能做
+            "/api/user"
     );
 
     /** 这些前缀下的接口必须登录（但不需要管理员） */

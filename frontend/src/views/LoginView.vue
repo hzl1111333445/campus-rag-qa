@@ -80,6 +80,10 @@ async function submit() {
       </div>
 
       <p class="hint">学生可以问答、看历史；管理员额外能上传文档、调试检索、跑评测。</p>
+
+      <div class="register-line">
+        还没有账号？<router-link to="/register" class="register-link">注册一个</router-link>
+      </div>
     </div>
   </div>
 </template>
@@ -136,5 +140,16 @@ async function submit() {
   font-size: 12px;
   color: #a8abb2;
   line-height: 1.6;
+}
+.register-line {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #8a94a6;
+  text-align: center;
+}
+
+.register-link {
+  color: #409eff;
+  text-decoration: none;
 }
 </style>

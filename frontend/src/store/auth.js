@@ -46,6 +46,16 @@ export async function login(username, password) {
   return data.user
 }
 
+/** 注册：后端注册成功会直接返回 {token,user}，所以注册完就等于登录了 */
+export async function register(username, password, displayName) {
+  const data = await http.post('/auth/register', { username, password, displayName })
+  authState.token = data.token
+  authState.user = data.user
+  setToken(data.token)
+  localStorage.setItem(USER_KEY, JSON.stringify(data.user))
+  return data.user
+}
+
 export function logout() {
   authState.token = ''
   authState.user = null

@@ -94,6 +94,47 @@ public class AuthService {
         }
     }
 
+    /**
+     * 自助注册：只允许注册成学生，角色不接受前端传参（否则人人都能注成管理员）。
+     *
+     * @return 与登录同结构的 {token, user}，注册完直接进站
+     */
+    public Map<String, Object> register(String username, String password, String displayName) {
+        String name = username == null ? "" : username.trim();
+        if (!name.matches("[A-Za-z0-9_]{3,20}")) {
+            // 注册类错误是"请求内容不对"，不是"没登录"，所以用 IllegalArgumentException(400) 而不是 AuthException(401)
+            throw new IllegalArgumentException("用户名要 3~20 位，只能用字母、数字、下划线");
+        }
+        if (password == null || password.length() < 6 || password.length() > 32) {
+            throw new IllegalArgumentException("密码长度要 6~32 位");
+        }
+        if (userDao.findByUsername(name) != null) {
+            throw new IllegalArgumentException("用户名已被占用，换一个试试");
+        }
+        String display = displayName == null ? "" : displayName.trim();
+        if (display.isEmpty()) {
+            display = name;
+        }
+        if (display.length() > 20) {
+            display = display.substring(0, 20);
+        }
+        createUser(name, password, ROLE_STUDENT, display);
+        // 注册完直接登录：少一次输入，也避免"注册成功但登不上"的困惑
+        return login(name, password);
+    }
+
+    /** 管理员重置某个用户的密码（不知道原密码也能改）。 */
+    public void resetPassword(long userId, String rawPassword) {
+        if (rawPassword == null || rawPassword.length() < 6 || rawPassword.length() > 32) {
+            throw new AuthException("新密码长度要 6~32 位");
+        }
+        if (userDao.findById(userId) == null) {
+            throw new AuthException("用户不存在：" + userId);
+        }
+        String salt = newSalt();
+        userDao.updatePassword(userId, hash(rawPassword, salt), salt);
+    }
+
     /** 建账号用（初始化默认账号、以后做"新增管理员"都走它）。 */
     public void createUser(String username, String rawPassword, String role, String displayName) {
         String salt = newSalt();

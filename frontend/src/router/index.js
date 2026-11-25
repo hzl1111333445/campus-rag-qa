@@ -4,6 +4,8 @@ import HealthView from '../views/HealthView.vue'
 import QaView from '../views/QaView.vue'
 import DocView from '../views/DocView.vue'
 import LoginView from '../views/LoginView.vue'
+import RegisterView from '../views/RegisterView.vue'
+import UserView from '../views/UserView.vue'
 import DebugView from '../views/DebugView.vue'
 import EvalView from '../views/EvalView.vue'
 import FeedbackView from '../views/FeedbackView.vue'
@@ -24,6 +26,18 @@ const routes = [
     name: 'login',
     component: LoginView,
     meta: { title: '登录', public: true }
+  },
+  {
+    path: '/register',
+    name: 'register',
+    component: RegisterView,
+    meta: { title: '注册', public: true }
+  },
+  {
+    path: '/users',
+    name: 'users',
+    component: UserView,
+    meta: { title: '用户管理', adminOnly: true }
   },
   {
     path: '/health',

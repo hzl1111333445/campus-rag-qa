@@ -21,6 +21,7 @@ const allMenus = [
   { path: '/debug', title: '检索调试', adminOnly: true },
   { path: '/eval', title: '评测看板', adminOnly: true },
   { path: '/feedback', title: '用户反馈', adminOnly: true },
+  { path: '/users', title: '用户管理', adminOnly: true },
   { path: '/health', title: '环境自检', adminOnly: false }
 ]
 
