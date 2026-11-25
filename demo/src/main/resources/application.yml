@@ -65,6 +65,17 @@ campus:
     enabled: ${REWRITE_ENABLED:false}          # 默认关；关掉时检索行为与之前完全一致
     timeout-seconds: ${REWRITE_TIMEOUT_SECONDS:8}
     cache-size: ${REWRITE_CACHE_SIZE:500}      # 同一问句第二次改写 0 成本
+  # ReAct 智能体循环（docs/32）。默认关：关掉时 /api/agent/** 直接返回 DISABLED，主链路不受影响。
+  # 打开后模型自己决定要不要检索（闲聊/通用知识不查库），也因此比固定管线慢 1~3 秒。
+  agent:
+    enabled: ${AGENT_ENABLED:false}
+    max-steps: ${AGENT_MAX_STEPS:6}                        # 最多几步（每步 = 一次模型调用 + 一次工具调用）
+    max-observation-chars: ${AGENT_MAX_OBSERVATION_CHARS:2000}   # 单条工具结果截断，防止撑爆上下文
+    max-same-call: ${AGENT_MAX_SAME_CALL:2}                # 同工具同参数重复几次即中止（防死循环）
+    default-top-k: ${AGENT_DEFAULT_TOP_K:5}
+    max-total-tokens: ${AGENT_MAX_TOTAL_TOKENS:12000}      # 一次执行的总 token 预算，超了直接降级
+    price-input-per-million: ${AGENT_PRICE_IN:2.0}         # 示例价，按官网现价改；只用于前端"≈¥"展示
+    price-output-per-million: ${AGENT_PRICE_OUT:8.0}
   # 查询分解：把"一句话两个意图"的复合问题拆成几个子问题各检索一遍再合并。
   # 默认关：开启后会多一次轻量模型调用（约 +0.3s），单跳问题用不上。
   decompose:

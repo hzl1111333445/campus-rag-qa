@@ -321,7 +321,7 @@ public class AgentLoop {
         }
     }
 
-    private List<Integer> badCitations(String answer, int size) {
+    public static List<Integer> badCitations(String answer, int size) {
         List<Integer> bad = new ArrayList<>();
         Matcher m = CITATION.matcher(answer);
         while (m.find()) {
@@ -344,11 +344,15 @@ public class AgentLoop {
     }
 
     private String truncate(String s) {
-        if (s == null) {
-            return "";
-        }
+        if (s == null) return "";
         int max = props.getMaxObservationChars();
-        return s.length() <= max ? s : s.substring(0, max) + "…（已截断）";
+        if (s.length() <= max) return s;
+        // 头 + 尾：检索结果常是连续的条文（「21-30 学时警告；31-40 严重警告；…」），
+        // 只保留开头会把后面的档位砍掉，模型就误以为"条款不全"。
+        int head = (int) (max * 0.6);
+        int tail = max - head;
+        return s.substring(0, head) + "\n…（中间省略 " + (s.length() - max) + " 字）…\n"
+                + s.substring(s.length() - tail);
     }
 
     private static Map<String, String> msg(String role, String content) {

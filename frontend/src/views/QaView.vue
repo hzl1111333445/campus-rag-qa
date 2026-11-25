@@ -2,7 +2,7 @@
 import { nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import http, { getToken } from '../api/http'
+import http, { getToken, httpRaw } from '../api/http'
 import { isAdmin } from '../store/auth'
 
 /**
@@ -32,6 +32,15 @@ const messages = ref([])
 const sessions = ref([])
 const sessionId = ref(null)
 const input = ref('')
+/** Agent 深度模式：允许模型自己决定要不要检索（能闲聊，也更慢）。默认关，尊重老的问答体验。 */
+const agentMode = ref(localStorage.getItem('campus_agent_mode') === '1')
+const agentInfo = ref({})   // 每条回答的 Agent 元信息：{ [messageId]: { steps, searched, status } }
+
+function toggleAgent(v) {
+  agentMode.value = v
+  localStorage.setItem('campus_agent_mode', v ? '1' : '0')
+}
+
 const topK = ref(3)
 const sending = ref(false)
 const scrollBox = ref(null)
@@ -186,7 +195,11 @@ async function send(text) {
   scrollToBottom()
 
   try {
-    await streamAsk(q, replyId)
+    if (agentMode.value) {
+      await agentAsk(q, replyId)
+    } else {
+      await streamAsk(q, replyId)
+    }
     loadSessions()
   } catch (e) {
     patchMessage(replyId, { streaming: false, error: e.message || String(e) })
@@ -194,6 +207,53 @@ async function send(text) {
     sending.value = false
     scrollToBottom()
   }
+}
+
+/**
+ * Agent 模式提问：POST /api/agent/chat（同步返回）。
+ *
+ * 为什么不流式：Agent 每一步都要先拿完整 JSON 才能决定下一步，天然没有"逐字到达"。
+ * 所以这里先占位"思考中（N 步）"，回来再整体替换——比假装流式诚实。
+ */
+async function agentAsk(q, replyId) {
+  patchMessage(replyId, { stage: 'Agent 正在判断要不要查资料…' })
+  const resp = await httpRaw.post('/agent/chat', {
+    question: q,
+    topK: topK.value,
+    sessionId: sessionId.value
+  })
+  const d = resp.data || {}
+  if (d.status === 'DISABLED') {
+    throw new Error('Agent 模式未启用（后端 campus.agent.enabled=false）')
+  }
+  const searched = (d.steps > 1) || (d.allowedChunks || []).length > 0
+  if (d.sessionId) sessionId.value = d.sessionId
+
+  patchMessage(replyId, {
+    streaming: false,
+    stage: '',
+    streamText: '',
+    data: {
+      answer: d.answer || '',
+      references: [],          // Agent 返回的是 chunkId 列表，不是完整引用对象，出处先不展示
+      retrievedCount: (d.allowedChunks || []).length,
+      topScore: null,
+      elapsedMs: d.totalMs,
+      totalTokens: d.totalTokens,
+      promptTokens: d.promptTokens,
+      completionTokens: d.completionTokens,
+      costYuan: d.costYuan,
+      citationOk: null,
+      grounded: null,
+      factCount: 0,
+      gated: false,
+      agentMode: true,
+      badCitationCount: d.badCitationCount,
+      agentSteps: d.steps,
+      agentSearched: searched
+    },
+    agentTag: searched ? `Agent · ${d.steps} 步 · 已检索` : `Agent · ${d.steps} 步 · 未检索（通用回答）`
+  })
 }
 
 /** 局部更新某条消息（避免整条替换导致流式时闪烁）。 */
@@ -428,6 +488,14 @@ function scoreText(v) {
  *   - 有引用且编号合法 → 通过
  */
 function citeTag(data) {
+  // Agent 模式：后端只回传"引用编号越界几处"，没有 references 数组
+  if (data.agentMode) {
+    const bad = Number(data.badCitationCount) || 0
+    if (bad) return { type: 'danger', text: `引用编号越界（${bad} 处）` }
+    return data.agentSearched
+      ? { type: 'success', text: '引用校验通过' }
+      : { type: 'info', text: '未引用资料' }
+  }
   const bad = (data.invalidCitations || []).length
   const cited = (data.references || []).length
   if (bad) return { type: 'danger', text: `引用编号异常（${bad} 处）` }
@@ -436,6 +504,7 @@ function citeTag(data) {
 }
 
 function groundedTag(data) {
+  if (data.agentMode) return { type: 'info', text: 'Agent 模式未做接地校验' }
   if (!data.grounded) return { type: 'danger', text: '接地校验未通过' }
   if (!data.factCount) return { type: 'info', text: '无可核对硬事实' }
   return { type: 'success', text: `接地通过 · 核了 ${data.factCount} 条` }
@@ -504,9 +573,16 @@ onMounted(async () => {
       <div class="chat-top">
         <div class="top-left">
           <span class="top-title">智能问答</span>
-          <span class="top-sub">只依据校内规章作答，答案可追溯到原文</span>
+          <span class="top-sub">{{ agentMode ? 'Agent 会先判断要不要查规章；通用问题直接答并标注来源' : '只依据校内规章作答，答案可追溯到原文' }}</span>
         </div>
         <div class="top-right">
+          <span class="top-label">Agent 模式</span>
+          <el-switch
+            :model-value="agentMode"
+            size="small"
+            style="margin-right: 14px"
+            @update:model-value="toggleAgent"
+          />
           <span class="top-label">资料条数</span>
           <el-select v-model="topK" size="small" style="width: 76px">
             <el-option v-for="n in [3, 4, 5, 8]" :key="n" :label="n" :value="n" />
@@ -609,7 +685,7 @@ onMounted(async () => {
               </div>
 
               <div class="answer-foot">
-                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms<template v-if="m.ttftMs"> · 首字 {{ m.ttftMs }} ms</template><template v-if="costText(m)"> · ≈ ¥{{ costText(m) }}<template v-if="tokenText(m)">（{{ tokenText(m) }}）</template></template></span>
+                <span class="foot-meta">{{ m.data.retrievedCount }} 块 · 最高相关度 {{ scoreText(m.data.topScore) }} · {{ m.data.elapsedMs }} ms<template v-if="m.ttftMs"> · 首字 {{ m.ttftMs }} ms</template><template v-if="m.agentTag"> · {{ m.agentTag }}</template><template v-if="costText(m)"> · ≈ ¥{{ costText(m) }}<template v-if="tokenText(m)">（{{ tokenText(m) }}）</template></template></span>
                 <span class="foot-actions">
                   <button
                     v-for="lv in [2, 1, 0]"

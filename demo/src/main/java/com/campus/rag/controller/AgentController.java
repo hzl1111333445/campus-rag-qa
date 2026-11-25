@@ -100,6 +100,8 @@ public class AgentController {
         body.put("answer", r.answer());
         body.put("steps", r.steps());
         body.put("allowedChunks", r.allowedChunks());
+        // 引用编号是否越界：Agent 模式下前端据此显示"引用校验通过/越界 N 处"
+        body.put("badCitationCount", com.campus.rag.service.AgentLoop.badCitations(r.answer(), r.allowedChunks().size()).size());
         body.put("totalMs", r.totalMs());
         body.put("promptTokens", r.promptTokens());
         body.put("completionTokens", r.completionTokens());

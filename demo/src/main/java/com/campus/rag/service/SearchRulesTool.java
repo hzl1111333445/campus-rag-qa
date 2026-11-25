@@ -17,7 +17,10 @@ public class SearchRulesTool implements AgentTool {
 
     private static final int DEFAULT_TOPK = 5;
     private static final int MAX_TOPK = 10;
-    private static final int SNIPPET_CHARS = 260;
+    // 单条命中最多给模型 900 字：expandHits 会把相邻块并进来（3 块约 750 字），
+    // 之前只给 260 字，会把「(4) 51学时以上…(5) 留校察看期内再犯…」这些后续档位直接切掉，
+    // 模型只能诚实地说「条款被截断」——那是我们造成的假缺失。
+    private static final int SNIPPET_CHARS = 900;
 
     private final RetrievalService retrievalService;
 
@@ -48,7 +51,9 @@ public class SearchRulesTool implements AgentTool {
         if (query.isBlank()) {
             return ToolResult.fail("query 不能为空");
         }
-        int topK = clampInt(args.get("topK"), DEFAULT_TOPK, 1, MAX_TOPK);
+        // 至少取 5 条：条文常是「A 档…B 档…」连着的，只取 3 条会把更高档位截掉，
+        // 模型只能诚实说"没拿到完整条款"——那是假缺失（expandHits 会带相邻块，但起点要多）
+        int topK = Math.max(clampInt(args.get("topK"), DEFAULT_TOPK, 1, MAX_TOPK), 5);
         try {
             RetrievalService.Best best = retrievalService.searchBestGated(query, topK);
             List<RetrievalService.Hit> hits = best.hits();

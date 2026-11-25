@@ -17,7 +17,7 @@ public class AgentProperties {
     private int maxSteps = 6;
 
     /** 单条 Observation 截断长度，避免把上下文撑爆。 */
-    private int maxObservationChars = 800;
+    private int maxObservationChars = 2000;
 
     /** 同一工具同一参数允许重复几次，超过即中止（防死循环）。 */
     private int maxSameCall = 2;
